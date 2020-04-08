@@ -8,6 +8,6 @@ echo "install git done."
 which go || apt install golang
 
 [[ -d $witnessdir ]] || git clone https://github.com/carltraveler/witness
-cd $witness; go build config_server.go
+cd $witnessdir; go build config_server.go
 
 ./config_server
