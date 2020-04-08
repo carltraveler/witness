@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	prefixdir        string = "./"
+	prefixdir        string = "/data/"
 	configRun        string = prefixdir + "config.run.json"
 	configFromTenant string = prefixdir + "config.json"
 	configFixed      string = "config.fixed.json"
@@ -50,7 +50,7 @@ func main() {
 	configBuff, err := ioutil.ReadFile(configFromTenant)
 	err = json.Unmarshal([]byte(configBuff), &configStore)
 	if err != nil {
-		fmt.Printf("%s", err)
+		fmt.Printf("Unmarshal configStore: %s", err)
 		os.Exit(1)
 	}
 
