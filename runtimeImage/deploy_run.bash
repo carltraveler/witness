@@ -10,8 +10,8 @@ which go || apt install golang
 echo "install go done."
 if ! which rustup ; then
 	curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly 
-	source $HOME/.cargo/env
 fi
+source $HOME/.cargo/env
 echo "install rust done."
 rustup target add wasm32-unknown-unknown
 echo "add target wasm32 done."
