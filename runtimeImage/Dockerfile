@@ -6,12 +6,10 @@ ADD deploy_run.bash /repodir/
 ADD wallet.dat /repodir/
 
 RUN apt update
-RUN apt install -y git
-RUN apt install -y golang
 RUN apt install -y curl
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly 
-RUN rustup target add wasm32-unknown-unknown
-RUN cargo install --git=https://github.com/ontio/ontio-wasm-build
+RUN export PATH="$HOME/.cargo/bin:$PATH";rustup target add wasm32-unknown-unknown
+ADD ontio-wasm-build /bin
 
 WORKDIR /repodir
 
