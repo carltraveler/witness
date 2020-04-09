@@ -1,19 +1,12 @@
-FROM ubuntu:18.04
+FROM carltraveler/witness_runtimev0:v1
 
-MAINTAINER steven chenglin.cn@163.com                                                                                                                     
+MAINTAINER steven chenglin.cn@163.com
 
-ADD deploy_run.bash /repodir/
-ADD wallet.dat /repodir/
+ADD images /images
 
-RUN apt update
-RUN apt install -y curl
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly 
-RUN export PATH="$HOME/.cargo/bin:$PATH";rustup target add wasm32-unknown-unknown
-ADD ontio-wasm-build /bin
+WORKDIR /images
 
-WORKDIR /repodir
-
-ENV PATH /repodir:$PATH
+ENV PATH /root/.cargo/bin:$PATH
 
 EXPOSE 8080
 

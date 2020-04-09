@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
-docker build -f Dockerfile -t carltraveler/witness_runtime:$1 .
+./prepare.bash
+docker build -f Dockerfile -t docker build -f Dockerfile -t carltraveler/witness_runtimev0:$1 .
