@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -11,16 +12,6 @@ import (
 	sdk "github.com/ontio/ontology-go-sdk"
 	"github.com/ontio/ontology-go-sdk/utils"
 	"github.com/ontio/ontology/common"
-)
-
-const (
-	prefixdir        string = "/data/"
-	configRun        string = prefixdir + "config.run.json"
-	configFromTenant string = prefixdir + "config.json"
-	configFixed      string = "config.fixed.json"
-	newcontractbash  string = "newcontract.bash"
-	newcontractname  string = "contract.wasm"
-	walletfixpasswd  string = "123456"
 )
 
 type ServerConfig struct {
@@ -44,7 +35,21 @@ type WitnessConfig struct {
 	AuthAddr  []string `json:"authaddr"`
 }
 
+var (
+	configPath = flag.String("runPath", "/data/", "configPath flag")
+)
+
 func main() {
+	flag.Parse()
+	fmt.Printf("runPath : %s\n", *configPath)
+	prefixdir := *configPath
+	configRun := prefixdir + "config.run.json"
+	configFromTenant := prefixdir + "config.json"
+	configFixed := "config.fixed.json"
+	newcontractbash := "newcontract.bash"
+	newcontractname := "contract.wasm"
+	walletfixpasswd := "123456"
+
 	var configStore WitnessConfig
 	var DefConfig ServerConfig
 	configBuff, err := ioutil.ReadFile(configFromTenant)
@@ -171,6 +176,9 @@ func DeployNewContract(ontSdk *sdk.OntologySdk, wasmfile string, walletpassword 
 		return "", fmt.Errorf("GetContractAddress err: %s", err)
 	}
 	contracthexAddr := contractAddr.ToHexString()
+	if checkContractExist(ontSdk, contracthexAddr) {
+		return "", fmt.Errorf("contracthexAddr %s already exist. change another Owner", contracthexAddr)
+	}
 
 	wallet, err := ontSdk.OpenWallet(newconfig.Walletname)
 	if err != nil {

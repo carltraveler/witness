@@ -17,4 +17,4 @@ ENV PATH /repodir:$PATH
 
 EXPOSE 8080
 
-CMD ["bash", "deploy_run.bash"]
+CMD ["bash", "run_server.bash"]
