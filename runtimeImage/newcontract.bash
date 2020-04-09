@@ -3,7 +3,6 @@ set -ex
 
 [[ $1 == "" ]] && exit 1
 dir=$(pwd)
-[[ ${dir##*/} != "runtimeImage" ]] && echo "work directory wrong" && exit 1
 cd contract
 
 sed -i "s/Ab1z3Sxy7ovn4AuScdmMh4PRMvcwCMzSNV/$1/g" src/lib.rs

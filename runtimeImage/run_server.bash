@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -ex
 
-prefixworkdir="./run/"
-witnessdir="witness" 
+prefixworkdir="/data"
+[[ $1 != "" ]] && prefixworkdir=$1
 export PATH="$HOME/.cargo/bin:$PATH"
 which rustup || {
 	echo "rustup not install"
@@ -14,27 +14,23 @@ which ontio-wasm-build || {
 }
 
 [[ -f $prefixworkdir/config.json ]] || { 
-	echo "config.json should be set by." && exit 1 
+	echo "config.json should be set by." 
+	exit 1 
 }
 
-[[ -d $witnessdir ]] || git clone https://github.com/carltraveler/witness
-
-{
-	cd $witnessdir/runtimeImage/;
-	cp witness_server_daemon $prefixworkdir;
-	echo "prepare witness_server_daemon done."
-	[[ -f $prefixworkdir/config.json ]] || { 
-		echo "config.json should be set by." && exit 1 
-	}
-	./confighandle -runPath $prefixworkdir
-	cd -
+[[ -f config.fixed.json ]] || { 
+	echo "config.fixed.json should be set by." 
+	exit 1 
 }
+
+./confighandle -runPath $prefixworkdir
 
 [[ $? == 0 ]] && {
+	# all save in docker
 	cp ./wallet.dat $prefixworkdir/
-	cp $witnessdir/runtimeImage/witness_server_daemon $prefixworkdir
+	cp ./witness_server_daemon $prefixworkdir
 	cd $prefixworkdir
 	echo "123456" | ./witness_server_daemon -l 2 -c config.run.json
 }
 
-echo "config failed."
+echo "config failed. or server exit"

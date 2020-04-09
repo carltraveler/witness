@@ -1,9 +1,9 @@
 {
 	"walletname": "./wallet.dat",
-	"ontnode": "http://polaris1.ont.io:20336",
+	"ontnode": "http://localhost:20336",
 	"signeraddress" : "APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2",
 	"serverport": 8080,
-	"gasprice": 500,
+	"gasprice": 0,
 	"cachetime": 10,
 	"batchnum": 30,
 	"trychaininterval": 2,

@@ -42,7 +42,7 @@ var (
 func main() {
 	flag.Parse()
 	fmt.Printf("runPath : %s\n", *configPath)
-	prefixdir := *configPath
+	prefixdir := *configPath + "/"
 	configRun := prefixdir + "config.run.json"
 	configFromTenant := prefixdir + "config.json"
 	configFixed := "config.fixed.json"
