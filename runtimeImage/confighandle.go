@@ -67,6 +67,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	for _, addr := range configStore.AuthAddr {
+		_, err = common.AddressFromBase58(addr)
+		if err != nil {
+			fmt.Printf("%s", err)
+			os.Exit(1)
+		}
+	}
+
 	// config Run exist indicate just server restart
 	_, err = os.Stat(configRun)
 	if err != nil {
