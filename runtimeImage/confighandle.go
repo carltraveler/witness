@@ -108,6 +108,7 @@ func main() {
 			os.Exit(1)
 		}
 
+		fmt.Printf("contract deploy ok address :%s\n", contracthexAddr)
 		DefConfig.ContracthexAddr = contracthexAddr
 	} else {
 		fmt.Printf("file %s exist\n", configRun)
@@ -126,7 +127,7 @@ func main() {
 		ontSdk := sdk.NewOntologySdk()
 		ontSdk.NewRpcClient().SetAddress(DefConfig.OntNode)
 
-		if !checkContractExist(ontSdk, DefConfig.ContracthexAddr) {
+		if !checkContractExist(ontSdk, DefConfig.ContracthexAddr, 3) {
 			fmt.Printf("restart contracthexAddr %s not exist", DefConfig.ContracthexAddr)
 			os.Exit(1)
 		}
@@ -158,14 +159,14 @@ func main() {
 
 	okconfig, err := json.Marshal(DefConfig)
 	if err != nil {
-		fmt.Printf("%s", err)
+		fmt.Printf("DefConfig Marshal err: %s", err)
 		os.Exit(1)
 	}
 	fmt.Printf("configRun: %s\n", string(okconfig))
 	// set ok config to config.run.json
 	err = ioutil.WriteFile(configRun, okconfig, 0644)
 	if err != nil {
-		fmt.Printf("%s", err)
+		fmt.Printf("WriteFile %s error: %s", configRun, err)
 		os.Exit(1)
 	}
 
@@ -184,7 +185,7 @@ func DeployNewContract(ontSdk *sdk.OntologySdk, wasmfile string, walletpassword 
 		return "", fmt.Errorf("GetContractAddress err: %s", err)
 	}
 	contracthexAddr := contractAddr.ToHexString()
-	if checkContractExist(ontSdk, contracthexAddr) {
+	if checkContractExist(ontSdk, contracthexAddr, 3) {
 		return "", fmt.Errorf("contracthexAddr %s already exist. change another Owner", contracthexAddr)
 	}
 
@@ -198,6 +199,7 @@ func DeployNewContract(ontSdk *sdk.OntologySdk, wasmfile string, walletpassword 
 		return "", fmt.Errorf("error in GetDefaultAccount:%s", err)
 	}
 
+	fmt.Printf("start")
 	gasprice := newconfig.GasPrice
 	deploygaslimit := uint64(200000000)
 	_, err = ontSdk.WasmVM.DeployWasmVMSmartContract(
@@ -221,19 +223,19 @@ func DeployNewContract(ontSdk *sdk.OntologySdk, wasmfile string, walletpassword 
 		return "", fmt.Errorf("error in WaitForGenerateBlock:%s", err)
 	}
 
-	if !checkContractExist(ontSdk, contracthexAddr) {
+	if !checkContractExist(ontSdk, contracthexAddr, 10) {
 		return "", fmt.Errorf("contracthexAddr %s not exist", contracthexAddr)
 	}
 
 	return contracthexAddr, nil
 }
 
-func checkContractExist(ontSdk *sdk.OntologySdk, contracthexAddr string) bool {
+func checkContractExist(ontSdk *sdk.OntologySdk, contracthexAddr string, n uint32) bool {
 	checkcount := uint32(0)
 	for {
 		payload, err := ontSdk.GetSmartContract(contracthexAddr)
 		if payload == nil || err != nil {
-			if checkcount < 3 {
+			if checkcount < n {
 				fmt.Printf("GetSmartContract: %s\n", err)
 				checkcount += 1
 				time.Sleep(3 * time.Second)
