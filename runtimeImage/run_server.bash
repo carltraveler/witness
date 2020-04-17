@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -ex
 
-prefixworkdir="/data"
+prefixworkdir="/data/"
+appconfigdir="/appconfig/"
 [[ $1 != "" ]] && prefixworkdir=$1
+[[ $2 != "" ]] && appconfigdir=$2
 export PATH="$HOME/.cargo/bin:$PATH"
 which rustup || {
 	echo "rustup not install"
@@ -13,7 +15,7 @@ which ontio-wasm-build || {
 	exit 1
 }
 
-[[ -f $prefixworkdir/config.json ]] || { 
+[[ -f $appconfigdir/config.json ]] || { 
 	echo "config.json should be set by." 
 	exit 1 
 }
@@ -23,9 +25,11 @@ which ontio-wasm-build || {
 	exit 1 
 }
 
-./confighandle -runPath $prefixworkdir
+echo "generate config.run.json."
+./confighandle -runPath $prefixworkdir -configPath $appconfigdir
 
 [[ $? == 0 ]] && {
+	echo "config success. start witness_server_daemon"
 	# all save in docker
 	cp ./wallet.dat $prefixworkdir/
 	cp ./witness_server_daemon $prefixworkdir

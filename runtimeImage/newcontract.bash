@@ -7,7 +7,7 @@ cd contract
 
 # save old file to restart.
 cp src/lib.rs ../lib.rs.bake
-sed -i "s/APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2/$1/g" src/lib.rs
+sed -i "s/Ab1z3Sxy7ovn4AuScdmMh4PRMvcwCMzSNV/$1/g" src/lib.rs
 echo "start build rust contract."
 RUSTFLAGS="-C link-arg=-zstack-size=32768" cargo build --release --target wasm32-unknown-unknown
 # restore old file.
