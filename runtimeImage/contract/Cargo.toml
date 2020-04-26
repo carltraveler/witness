@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-ontio-std = {git = "https://github.com/ontio/ontology-wasm-cdt-rust", features=["bump-alloc"]}
+ontio-std = {git = "https://github.com/ontio/ontology-wasm-cdt-rust",rev="612440c35b5f5bd79de9010862d13095f052e06a", features=["bump-alloc"]}
 staticvec = {git = "https://github.com/slightlyoutofphase/staticvec", default-features=false}
 
 [features]
