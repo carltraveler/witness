@@ -49,6 +49,7 @@ const (
 	PREFIX_LATEST_FAILED_TX       DataPrefix = 0x6
 	PREFIX_CURRENT_BLOCKHEIGHT    DataPrefix = 0x7
 	PREFIX_FILEHASH_APPEND_FAILED DataPrefix = 0x8
+	PREFIX_CONTRACT_ADDRESS       DataPrefix = 0x9
 )
 
 const (
@@ -56,6 +57,9 @@ const (
 	fileHashStoreName    string = "filestore.db"
 	TxchCap              uint32 = 5000
 	fileHashAppendFailed string = "true"
+	CORRECT_ONLY         uint32 = 1
+	CORRECT_ALL          uint32 = 2
+	CORRECT_NONE         uint32 = 0
 )
 
 var (
@@ -87,6 +91,7 @@ const (
 	VERIFY_FAILED   int64 = 41003
 	NODE_OUTSERVICE int64 = 41004
 	NO_AUTH         int64 = 41005
+	DUP_HASH        int64 = 41006
 )
 
 const TxExecFailed uint32 = 1
@@ -98,6 +103,7 @@ var ErrMap = map[int64]string{
 	VERIFY_FAILED:   "VERIFY_FAILED",
 	NODE_OUTSERVICE: "NODE_OUTSERVICE",
 	NO_AUTH:         "NO_AUTH",
+	DUP_HASH:        "DUP_HASH",
 }
 
 func checkAuthorizeOfAddress(address common.Address) bool {
@@ -229,7 +235,48 @@ func InitSigner() error {
 	return nil
 }
 
-func InitCompactMerkleTree() error {
+func checkContontractAlreadyUsed(ontSdk *sdk.OntologySdk) error {
+	tx, err := contractVerifyTransaction(ontSdk)
+	if err != nil {
+		return err
+	}
+
+	var result *sdkcom.PreExecResult
+	callCount := uint32(0)
+	for {
+		result, err = ontSdk.ClientMgr.PreExecTransaction(tx)
+		if err != nil {
+			if callCount > 2 {
+				return err
+			}
+			callCount++
+			time.Sleep(time.Second * 1)
+			continue
+		}
+		break
+	}
+	raw, err := result.Result.ToByteArray()
+	if err != nil {
+		return err
+	}
+	source := common.NewZeroCopySource(raw)
+	_, eof := source.NextHash()
+	if eof {
+		return errors.New("checkContontractAlreadyUsed: error decode root hash.")
+	}
+	size, eof := source.NextUint32()
+	if eof {
+		return errors.New("checkContontractAlreadyUsed: error decode root size.")
+	}
+	if size != 0 {
+		return fmt.Errorf("checkContontractAlreadyUsed: chain merkle tree size: %d", size)
+	}
+	log.Debugf("checkContontractAlreadyUsed pass.")
+
+	return nil
+}
+
+func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 	var err error
 	cMTree := &merkle.CompactMerkleTree{}
 	DefStore, err = leveldbstore.NewLevelDBStore(levelDBName)
@@ -281,7 +328,21 @@ func InitCompactMerkleTree() error {
 	_, err = DefStore.Get(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH))
 	if err != nil {
 		// localHeight not init. first time init.
+		log.Info("server first run time. init.")
 		callCount := uint32(0)
+		if !updatecontract {
+			err = checkContontractAlreadyUsed(DefSdk)
+			if err != nil {
+				return err
+			}
+		}
+		// init contractAddress
+		err = DefStore.Put(GetKeyByHash(PREFIX_CONTRACT_ADDRESS, merkle.EMPTY_HASH), contractAddress[:])
+		if err != nil {
+			return err
+		}
+
+		// check the chain contract if already used.
 		for {
 			blockHeight, err := DefSdk.GetCurrentBlockHeight()
 			if err != nil || blockHeight == 0 {
@@ -295,9 +356,35 @@ func InitCompactMerkleTree() error {
 			}
 
 			sinkh := common.NewZeroCopySink(nil)
-			sinkh.WriteUint32(blockHeight)
-			DefStore.Put(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH), sinkh.Bytes())
+			if forceHeight == 0 {
+				sinkh.WriteUint32(blockHeight)
+			} else {
+				sinkh.WriteUint32(forceHeight)
+			}
+			err = DefStore.Put(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH), sinkh.Bytes())
+			if err != nil {
+				return err
+			}
 			break
+		}
+	} else {
+		// check contract change restart.
+		if updatecontract {
+			log.Infof("Update the Contract Address in init to %x.", contractAddress)
+			err = DefStore.Put(GetKeyByHash(PREFIX_CONTRACT_ADDRESS, merkle.EMPTY_HASH), contractAddress[:])
+			if err != nil {
+				return err
+			}
+		} else {
+			var tmpContractAddr common.Address
+			addrByte, err := DefStore.Get(GetKeyByHash(PREFIX_CONTRACT_ADDRESS, merkle.EMPTY_HASH))
+			if err != nil {
+				return err
+			}
+			copy(tmpContractAddr[:], addrByte)
+			if tmpContractAddr != contractAddress {
+				return fmt.Errorf("Init Error. Can not change contractAddress %s to %s after restart.", tmpContractAddr.ToHexString(), contractAddress.ToHexString())
+			}
 		}
 	}
 
@@ -489,7 +576,7 @@ func getTxWithArgs(ontSdk *sdk.OntologySdk, args []interface{}) (*types.MutableT
 	return tx, nil
 }
 
-func RoutineOfAddToLocalStorage() {
+func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 	for {
 		if SystemOutOfService {
 			return
@@ -535,7 +622,11 @@ func RoutineOfAddToLocalStorage() {
 
 		// each block has a such data. memhashstore tmpTree
 		memhashstore := NewMemHashStore()
-		tmpTree := merkle.NewTree(DefMerkleTree.TreeSize(), DefMerkleTree.Hashes(), memhashstore)
+		temphashes := make([]common.Uint256, len(DefMerkleTree.Hashes()))
+		for i, h := range DefMerkleTree.Hashes() {
+			temphashes[i] = h
+		}
+		tmpTree := merkle.NewTree(DefMerkleTree.TreeSize(), temphashes, memhashstore)
 
 		for _, event := range blockevents {
 			// in this loop continue will be very carefull. because must coherence with block sequence.
@@ -618,6 +709,7 @@ func RoutineOfAddToLocalStorage() {
 					putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1)
 				}
 
+				log.Infof("tx hash, %s, Local Height: %d, CurrentBlockHeight: %d", event.TxHash, localHeight, blockHeight)
 				if newroot != tmpTree.Root() || newtreeSize != tmpTree.TreeSize() {
 					SystemOutOfService = true
 					log.Fatalf("RoutineOfAddToLocalStorage: chainroot: %x, root : %x, chaintreeSize: %d, treeSize: %d", newroot, tmpTree.Root(), newtreeSize, tmpTree.TreeSize())
@@ -628,6 +720,74 @@ func RoutineOfAddToLocalStorage() {
 				delTransaction(&store, tx.Hash())
 
 				log.Infof("root: %x, treeSize: %d", tmpTree.Root(), tmpTree.TreeSize())
+			} else {
+				// check need check coherence with contract.
+				if correctDatabase == CORRECT_NONE {
+					continue
+				}
+
+				newroot, newtreeSize, txExecFailed, err := GetChainRootTreeSize(event)
+				log.Debugf("RoutineOfAddToLocalStorage: check tx not in pool. %s", err)
+				if err == nil && !txExecFailed {
+					// must tx from server contract address if enter in here. but need exclude all any other notify. be sure is batchadd. not other like get_root.
+					count := uint32(0)
+					var txchain *types.Transaction
+					var err error
+					// loop to get transaction.
+					for {
+						txchain, err = DefSdk.GetTransaction(event.TxHash)
+						if err != nil {
+							if count > 100 {
+								log.Fatalf("RoutineOfAddToLocalStorage: found transaction not in pool. some one may operate the chain contract. or just get_root need check: %s. chain offline. just restart to try.", err)
+								SystemOutOfService = true
+								return
+							}
+							time.Sleep(time.Second * time.Duration(DefConfig.SendTxInterval))
+							count++
+							continue
+						}
+						break
+					}
+
+					mutxchain, err := txchain.IntoMutable()
+					if err != nil {
+						log.Fatalf("RoutineOfAddToLocalStorage: found transaction not in pool. some one may operate the chain contract. or just get_root need check: but here tx to mutable err, %s .chain offline. just restart to try.", err)
+						SystemOutOfService = true
+						return
+					}
+
+					leafv, err := leafvFromTx(mutxchain)
+					if err != nil {
+						log.Infof("RoutineOfAddToLocalStorage: localHeight: %d. CurrentBlockHeight: %d. no need handle tx %s", localHeight, blockHeight, err)
+						// here should be checked get_root. check next event
+						continue
+					}
+
+					// assert this will put tmpTree to local ledger.
+					handledMerkleTx = true
+					log.Warnf("RoutineOfAddToLocalStorage: get tx from other server. tx hash %s. hash num : %d", event.TxHash, len(leafv))
+					// here get tx from other server.
+					for i := uint32(0); i < uint32(len(leafv)); i++ {
+						if tmpTree.TreeSize() == math.MaxUint32 {
+							log.Errorf("RoutineOfAddToLocalStorage: get tx from other server, Over max the MaxUint32 merkle size.")
+							SystemOutOfService = true
+							return
+						}
+						tmpTree.AppendHash(leafv[i])
+						putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1)
+					}
+
+					log.Infof("tx hash, %s, Local Height: %d, CurrentBlockHeight: %d", event.TxHash, localHeight, blockHeight)
+					if newroot != tmpTree.Root() || newtreeSize != tmpTree.TreeSize() {
+						SystemOutOfService = true
+						log.Fatalf("RoutineOfAddToLocalStorage: get tx from other server, chainroot: %x, root : %x, chaintreeSize: %d, treeSize: %d", newroot, tmpTree.Root(), newtreeSize, tmpTree.TreeSize())
+						return
+					}
+
+					putRootBlockHeight(&store, tmpTree.Root(), localHeight)
+					log.Infof("tx from other server. root: %x, treeSize: %d", tmpTree.Root(), tmpTree.TreeSize())
+				}
+				// here indicate tx not influence contract. check next event.
 			}
 		}
 
@@ -713,9 +873,22 @@ func GetChainRootTreeSize(event *sdkcom.SmartContactEvent) (common.Uint256, uint
 		return merkle.EMPTY_HASH, 0, true, nil
 	}
 
+	if len(event.Notify) == 0 {
+		return merkle.EMPTY_HASH, 0, false, fmt.Errorf("GetChainNotifyByTxHash: notify should not empty.")
+	}
+
 	var newroot common.Uint256
 	var treeSize uint32
 	var err error
+	txaddr, err := common.AddressFromHexString(event.Notify[0].ContractAddress)
+	if err != nil {
+		return merkle.EMPTY_HASH, 0, false, fmt.Errorf("GetChainNotifyByTxHash: address convert failed %s.", err)
+	}
+
+	if txaddr != contractAddress {
+		return merkle.EMPTY_HASH, 0, false, fmt.Errorf("GetChainNotifyByTxHash: address %x not match address %x.", txaddr, contractAddress)
+	}
+
 	switch val := event.Notify[0].States.(type) {
 	case []interface{}:
 		if len(val) != 2 {
@@ -834,7 +1007,7 @@ func ledgerAppendTxRoll(store leveldbstore.LevelDBStore, leafv []common.Uint256)
 	return err
 }
 
-func RoutineOfBatchAdd(leafv []common.Uint256) error {
+func RoutineOfBatchAdd(leafv []common.Uint256) ([]string, error) {
 	var store leveldbstore.LevelDBStore
 	store = *DefStore
 	store.NewBatch()
@@ -851,12 +1024,12 @@ func RoutineOfBatchAdd(leafv []common.Uint256) error {
 	if uint32(len(leafv)) == DefConfig.BatchNum {
 		tx, err = constructTransation(DefSdk, leafv)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		err = putTransaction(&store, tx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		// if duplicate will drop batch.
@@ -867,19 +1040,24 @@ func RoutineOfBatchAdd(leafv []common.Uint256) error {
 	// only lock the duplicate logic
 	Existlock.Lock()
 	defer Existlock.Unlock()
+	duplicateLeafs := make([]string, 0)
 
 	for i := uint32(0); i < uint32(len(leafv)); i++ {
 		_, err := getLeafIndex(&store, leafv[i])
 		if err == nil {
-			return errors.New("duplicate hash leafs. please check.")
+			duplicateLeafs = append(duplicateLeafs, common.ToHexString(leafv[i][:]))
 		}
 		putLeafIndex(&store, leafv[i], math.MaxUint32)
+	}
+
+	if len(duplicateLeafs) != 0 {
+		return duplicateLeafs, errors.New("duplicate hash leafs. please check.")
 	}
 
 	// this must be lock.
 	err = store.BatchCommit()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// send to cache.
@@ -888,12 +1066,12 @@ func RoutineOfBatchAdd(leafv []common.Uint256) error {
 			Leafs: leafv,
 		}
 		cacheChannel <- leafs
-		return nil
+		return nil, nil
 	}
 
 	TxStore.PublishAddHashes(addHashes)
 
-	return nil
+	return nil, nil
 }
 
 func leafvFromTx(tx *types.MutableTransaction) ([]common.Uint256, error) {
@@ -1135,6 +1313,22 @@ var (
 		Usage: "set the log levela.",
 		Value: log.InfoLog,
 	}
+	UpdateContractFlag = cli.BoolFlag{
+		Name:  "updatecontract",
+		Usage: "update the contract address if contract migrate.",
+	}
+	// 0: do not check tx from other server. do not correct.  1: only correctdatabase. do not start any other routine or service other than localedger.
+	// 2: correct database and all routing start norlmal
+	CorrectDataBaseFlag = cli.UintFlag{
+		Name:  "correctdatabase",
+		Usage: "try to correct databases coherence wiht onchain.",
+		Value: uint(0),
+	}
+	ForceHeightFlag = cli.UintFlag{
+		Name:  "forceheight",
+		Usage: "force set blockheight when init.",
+		Value: uint(0),
+	}
 )
 
 func setupAPP() *cli.App {
@@ -1147,6 +1341,9 @@ func setupAPP() *cli.App {
 	app.Flags = []cli.Flag{
 		ConfigFlag,
 		LogLevelFlag,
+		UpdateContractFlag,
+		CorrectDataBaseFlag,
+		ForceHeightFlag,
 	}
 	app.Before = func(context *cli.Context) error {
 		runtime.GOMAXPROCS(runtime.NumCPU())
@@ -1187,6 +1384,18 @@ func startOGQServer(ctx *cli.Context) error {
 	LogLevel := ctx.Uint(utils.GetFlagName(LogLevelFlag))
 	log.InitLog(int(LogLevel), log.PATH, log.Stdout)
 
+	updatecontract := ctx.Bool(utils.GetFlagName(UpdateContractFlag))
+	log.Infof("init updatecontract: %v", updatecontract)
+
+	correctDatabase := uint32(ctx.Uint(utils.GetFlagName(CorrectDataBaseFlag)))
+	log.Infof("init correctDatabase: %d", correctDatabase)
+	if correctDatabase != CORRECT_ONLY && correctDatabase != CORRECT_ALL && correctDatabase != CORRECT_NONE {
+		return fmt.Errorf("init correctDatabase error %d", correctDatabase)
+	}
+
+	forceHeight := uint32(ctx.Uint(utils.GetFlagName(ForceHeightFlag)))
+	log.Infof("init forceHeight: %d", forceHeight)
+
 	err := initConfig(ctx)
 	if err != nil {
 		return err
@@ -1197,18 +1406,21 @@ func startOGQServer(ctx *cli.Context) error {
 		return err
 	}
 
-	err = InitCompactMerkleTree()
+	err = InitCompactMerkleTree(updatecontract, forceHeight)
 	if err != nil {
 		return err
 	}
 
-	err = initRPCServer()
-	if err != nil {
-		return err
+	if correctDatabase != CORRECT_ONLY {
+		err = initRPCServer()
+		if err != nil {
+			return err
+		}
+
+		go RoutineOfSendTx()
 	}
 
-	go RoutineOfSendTx()
-	go RoutineOfAddToLocalStorage()
+	go RoutineOfAddToLocalStorage(correctDatabase)
 
 	waitToExit(ctx)
 
@@ -1376,10 +1588,14 @@ func rpcBatchAdd(addargs *RpcParam) map[string]interface{} {
 		return responsePack(NO_AUTH, "Verify failed. sigData not right.")
 	}
 
-	err = RoutineOfBatchAdd(hashes)
+	dup, err := RoutineOfBatchAdd(hashes)
 	if err != nil {
 		log.Infof("batch add failed %s\n", err)
-		return responsePack(ADDHASH_FAILED, err.Error())
+		if dup != nil {
+			return responseFailed(DUP_HASH, err.Error(), dup)
+		} else {
+			return responseFailed(ADDHASH_FAILED, err.Error(), dup)
+		}
 	}
 
 	if DefConfig.BatchAddSleepTime != 0 {
@@ -1402,6 +1618,15 @@ func responsePack(errcode int64, result interface{}) map[string]interface{} {
 	return resp
 }
 
+func responseFailed(errcode int64, errmsg string, result interface{}) map[string]interface{} {
+	resp := map[string]interface{}{
+		"error":  errcode,
+		"desc":   ErrMap[errcode] + ": " + errmsg,
+		"result": result,
+	}
+	return resp
+}
+
 func waitToExit(ctx *cli.Context) {
 	exit := make(chan bool, 0)
 	sc := make(chan os.Signal, 1)
@@ -1414,24 +1639,11 @@ func waitToExit(ctx *cli.Context) {
 			close(SendTxChannel)
 			wg.Wait()
 			log.Info("Now exit")
-
-			var batchstore leveldbstore.LevelDBStore
-			batchstore = *DefStore
-			batchstore.NewBatch()
-			SaveCompactMerkleTree(DefMerkleTree, &batchstore)
-			TxStore.UpdateSelfToBatch(&batchstore, nil)
-			err := batchstore.BatchCommit()
-			if err != nil {
-				log.Errorf("%s", err)
-			}
-			log.Info("save data ok")
-
 			DefStore.Close()
 			close(exit)
 			break
 		}
 	}()
-	log.Info("server started")
 	<-exit
 }
 

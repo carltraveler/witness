@@ -34,7 +34,7 @@ echo "generate config.run.json."
 	cp ./wallet.dat $prefixworkdir/
 	cp ./witness_server_daemon $prefixworkdir
 	cd $prefixworkdir
-	echo "123456" | ./witness_server_daemon -l 2 -c config.run.json
+	echo "123456" | ./witness_server_daemon -l 2 --correctdatabase 2 -c config.run.json
 }
 
 echo "config failed. or server exit"

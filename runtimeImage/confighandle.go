@@ -144,22 +144,25 @@ func main() {
 		}
 
 		DefConfig.ContracthexAddr = contracthexAddr
-		UpdateConfigRunAuth(&DefConfig, &configStore)
+		DefConfig.Authorize = configStore.AuthAddr
 		err = WriteConfigRunJson(&DefConfig, configRun)
 		if err != nil {
 			fmt.Printf("WriteConfigRunJson err: %s", err)
+			os.Remove(configRun)
 			os.Exit(1)
 		}
 
 		signer, err := initSigner(ontSdk, &DefConfig, walletfixpasswd)
 		if err != nil {
 			fmt.Printf("initSigner err: %s", err)
+			os.Remove(configRun)
 			os.Exit(1)
 		}
 
 		initx, err := constructInitTransation(ontSdk, &DefConfig, signer)
 		if err != nil {
 			fmt.Printf("constructInitTransation failed %s", err)
+			os.Remove(configRun)
 			os.Exit(1)
 		}
 
@@ -174,7 +177,7 @@ func main() {
 		for {
 			_, err = ontSdk.SendTransaction(initx)
 			if err != nil {
-				if checkcount < 100 {
+				if checkcount < 1000 {
 					fmt.Printf("SendTransaction init failed %s. try again.", err)
 					checkcount += 1
 					time.Sleep(3 * time.Second)
@@ -210,7 +213,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		UpdateConfigRunAuth(&DefConfig, &configStore)
+		DefConfig.Authorize = configStore.AuthAddr
 		err = WriteConfigRunJson(&DefConfig, configRun)
 		if err != nil {
 			fmt.Printf("WriteConfigRunJson err: %s", err)
@@ -220,27 +223,13 @@ func main() {
 }
 
 func UpdateConfigRunAuth(DefConfig *ServerConfig, configStore *WitnessConfig) {
-	AuthAddrList := make([]string, 0)
-	AuthAddrList = append(AuthAddrList, DefConfig.Authorize...)
-	var duplicate bool
-	for _, AuthAddr := range configStore.AuthAddr {
-		duplicate = false
-		for _, i := range DefConfig.Authorize {
-			if AuthAddr == i {
-				duplicate = true
-				break
-			}
-		}
-
-		if !duplicate {
-			AuthAddrList = append(AuthAddrList, AuthAddr)
-		}
-	}
-
-	DefConfig.Authorize = AuthAddrList
+	DefConfig.Authorize = configStore.AuthAddr
+	fmt.Printf("server config %v\n", DefConfig)
 }
 
 func WriteConfigRunJson(DefConfig *ServerConfig, configRun string) error {
+	fmt.Printf("address %v\n", DefConfig.Authorize)
+	fmt.Printf("configRun: %v\n", DefConfig)
 	if DefConfig.ServerPort == 0 || DefConfig.CacheTime == 0 || len(DefConfig.Walletname) == 0 || len(DefConfig.SignerAddress) == 0 || len(DefConfig.OntNode) == 0 || len(DefConfig.ContracthexAddr) == 0 || len(DefConfig.Authorize) == 0 || DefConfig.BatchNum == 0 || DefConfig.SendTxInterval == 0 || DefConfig.TryChainInterval == 0 || DefConfig.SendTxSize == 0 {
 		return fmt.Errorf("serverconfig not set ok\n")
 	}
