@@ -1,0 +1,7 @@
+{
+	"url":"http://127.0.0.1:8080",
+	"addon_id":"123",
+	"tenant_id":"456",
+	"wallet":"./wallet.dat",
+	"signer":"APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2"
+}

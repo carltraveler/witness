@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -20,12 +21,22 @@ import (
 	"github.com/ontio/ontology-crypto/keypair"
 	sdk "github.com/ontio/ontology-go-sdk"
 	"github.com/ontio/ontology/common"
+	"github.com/ontio/ontology/common/log"
+	"github.com/ontio/ontology/common/password"
 	"github.com/ontio/ontology/core/signature"
 	"github.com/ontio/ontology/merkle"
 )
 
 //JsonRpc version
 const JSON_RPC_VERSION = "2.0"
+
+type ClientConfig struct {
+	Url     string `json:"url"`
+	AddOnId string `json:"addon_id"`
+	TenatId string `json:"tenant_id"`
+	Wallet  string `json:"wallet"`
+	Singer  string `json:"signer"`
+}
 
 //JsonRpcRequest object in rpc
 type JsonRpcRequest struct {
@@ -37,10 +48,10 @@ type JsonRpcRequest struct {
 
 //JsonRpcResponse object response for JsonRpcRequest
 type JsonRpcBatchAddResponse struct {
-	Id     string `json:"id"`
-	Error  int64  `json:"error"`
-	Desc   string `json:"desc"`
-	Result string `json:"result"`
+	Id     string      `json:"id"`
+	Error  int64       `json:"error"`
+	Desc   string      `json:"desc"`
+	Result interface{} `json:"result"`
 }
 
 type JsonRpcVerifyResponse struct {
@@ -84,7 +95,7 @@ func (this *RpcClient) GetNextQid() string {
 }
 
 //sendRpcRequest send Rpc request to ontology
-func (this *RpcClient) sendRpcRequest(qid, method string, params RpcParam) (interface{}, error) {
+func (this *RpcClient) sendRpcRequest(clientConfig *ClientConfig, qid, method string, params RpcParam) (interface{}, error) {
 	rpcReq := &JsonRpcRequest{
 		Version: JSON_RPC_VERSION,
 		Id:      qid,
@@ -95,7 +106,20 @@ func (this *RpcClient) sendRpcRequest(qid, method string, params RpcParam) (inte
 	if err != nil {
 		return nil, fmt.Errorf("JsonRpcRequest json.Marsha error:%s", err)
 	}
-	resp, err := this.httpClient.Post(this.addr, "application/json", bytes.NewReader(data))
+
+	req, err := http.NewRequest("POST", this.addr, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("addonID", clientConfig.AddOnId)
+	req.Header.Set("tenantID", clientConfig.TenatId)
+	log.Infof("%s, %s", clientConfig.AddOnId, clientConfig.TenatId)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := this.httpClient.Do(req)
+
+	//resp, err := this.httpClient.Post(this.addr, "application/json", bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("http post request:%s error:%s", data, err)
 	}
@@ -113,12 +137,11 @@ func (this *RpcClient) sendRpcRequest(qid, method string, params RpcParam) (inte
 			return nil, fmt.Errorf("json.Unmarshal JsonRpcResponse:%s error:%s", body, err)
 		}
 		if rpcRsp.Error != 0 {
-			return nil, fmt.Errorf("JsonRpcResponse error code:%d desc:%s result:%s", rpcRsp.Error, rpcRsp.Desc, rpcRsp.Result)
+			return nil, fmt.Errorf("JsonRpcResponse error code:%d desc:%s result:%v", rpcRsp.Error, rpcRsp.Desc, rpcRsp.Result)
 		}
 
-		return nil, nil
+		return rpcRsp.Result, nil
 	} else if method == "verify" {
-		//fmt.Printf("response:\n%s", string(body))
 		rpcRsp := &JsonRpcVerifyResponse{}
 		err = json.Unmarshal(body, rpcRsp)
 		if rpcRsp.Error != 0 {
@@ -130,10 +153,10 @@ func (this *RpcClient) sendRpcRequest(qid, method string, params RpcParam) (inte
 	return nil, errors.New("error method")
 }
 
-func verifyLeaf(client *RpcClient, leafs []common.Uint256) error {
+func verifyLeaf(clientConfig *ClientConfig, client *RpcClient, leafs []common.Uint256) error {
 	for i := uint32(0); i < uint32(len(leafs)); i++ {
 		vargs := getVerifyArgs(leafs[i])
-		res, err := client.sendRpcRequest(client.GetNextQid(), "verify", vargs)
+		res, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "verify", vargs)
 		if err != nil {
 			return fmt.Errorf("verifyLeaf [%x] Failed: %s\n", leafs[i], err)
 		}
@@ -148,12 +171,12 @@ func verifyLeaf(client *RpcClient, leafs []common.Uint256) error {
 	return nil
 }
 
-func sendtx() {
+func sendtx(clientConfig *ClientConfig) {
 	//testUrl := "http://127.0.0.1:32339"
-	testUrl := "http://127.0.0.1:32338"
+	//testUrl := "http://127.0.0.1:32338"
 	//testUrl := "http://127.0.0.1:8080"
 	//testUrl := "https://attestation.ont.io"
-	client := NewRpcClient(testUrl)
+	client := NewRpcClient(clientConfig.Url)
 	SystemOut = false
 	wg.Add(1)
 	defer wg.Done()
@@ -168,16 +191,15 @@ func sendtx() {
 		leafs = GenerateLeafv(uint32(0)+N*m, N)
 		addArgs := leafvToAddArgs(leafs)
 		if verify {
-			verifyLeaf(client, leafs)
+			verifyLeaf(clientConfig, client, leafs)
 		} else {
-			_, err := client.sendRpcRequest(client.GetNextQid(), "batchAdd", addArgs)
+			_, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "batchAdd", addArgs)
 			if err != nil {
 				if k == 0 {
-					fmt.Printf("Add Error: %s, added num: %d\n", err, 0)
+					log.Errorf("Add Error: %s, added num: %d\n", err, 0)
 				} else {
-					fmt.Printf("Add Error: %s, added num: %d\n", err, k*m)
+					log.Errorf("Add Error: %s, added num: %d\n", err, k*m)
 				}
-				panic("xxxx")
 			}
 			k++
 		}
@@ -195,19 +217,49 @@ var (
 )
 
 var (
-	N        uint32 = 5
-	numbatch uint32 = 10000000
+	N        uint32 = 1
+	numbatch uint32 = 1
 	verify   bool   = false
 )
 
+var (
+	configPath = flag.String("configPath", "./config.json", "configPath flag")
+)
+
 func main() {
-	defer clean()
-	err := InitSigner()
+	flag.Parse()
+	log.Infof("configPath: %s\n", *configPath)
+	var clientConfig ClientConfig
+
+	buffFixed, err := ioutil.ReadFile(*configPath)
 	if err != nil {
-		panic(err)
+		log.Errorf("init: %s", err)
+		os.Exit(1)
 	}
-	go sendtx()
-	fmt.Printf("ready to done. use ctrl+c\n")
+
+	err = json.Unmarshal([]byte(buffFixed), &clientConfig)
+	if err != nil {
+		log.Errorf("NewConfigServer: %s", err)
+		os.Exit(1)
+	}
+
+	log.Infof("config fixed %v", &clientConfig)
+
+	passwd, err := password.GetAccountPassword()
+	if err != nil {
+		log.Errorf("input password error %s", err)
+		os.Exit(1)
+	}
+
+	err = InitSigner(clientConfig.Wallet, clientConfig.Singer, string(passwd))
+	if err != nil {
+		fmt.Printf("%s", err)
+		os.Exit(1)
+		return
+	}
+	//testUrl := "http://127.0.0.1:8080"
+	go sendtx(&clientConfig)
+	fmt.Printf("use ctrl+c to stop\n")
 	waitToExit()
 }
 
@@ -370,10 +422,6 @@ func getVerifyArgs(leaf common.Uint256) RpcParam {
 	return vargs
 }
 
-func clean() {
-	os.RemoveAll("merkletree.db")
-}
-
 func HashFromHexString(s string) (common.Uint256, error) {
 	hx, err := common.HexToBytes(s)
 	if err != nil {
@@ -388,14 +436,14 @@ func HashFromHexString(s string) (common.Uint256, error) {
 
 var DefSigner sdk.Signer
 
-func InitSigner() error {
+func InitSigner(walletname string, signerAddress string, passwd string) error {
 	DefSdk := sdk.NewOntologySdk()
-	wallet, err := DefSdk.OpenWallet("wallet.dat")
+	wallet, err := DefSdk.OpenWallet(walletname)
 	if err != nil {
 		return fmt.Errorf("error in OpenWallet:%s\n", err)
 	}
 
-	DefSigner, err = wallet.GetAccountByAddress("APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2", []byte("123456"))
+	DefSigner, err = wallet.GetAccountByAddress(signerAddress, []byte(passwd))
 	if err != nil {
 		return fmt.Errorf("error in GetDefaultAccount:%s\n", err)
 	}
