@@ -1,12 +1,10 @@
-FROM carltraveler/witness_runtimev0:v1
+FROM ubuntu:18.04
 
 MAINTAINER steven chenglin.cn@163.com
 
 ADD images /images
 
 WORKDIR /images
-
-ENV PATH /root/.cargo/bin:$PATH
 
 EXPOSE 8080
 

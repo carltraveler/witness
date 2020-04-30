@@ -4,17 +4,56 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"time"
 
 	sdk "github.com/ontio/ontology-go-sdk"
 	"github.com/ontio/ontology-go-sdk/utils"
 	"github.com/ontio/ontology/common"
+	"github.com/ontio/ontology/common/log"
+	"github.com/ontio/ontology/common/password"
+	"github.com/ontio/ontology/core/store/leveldbstore"
 	"github.com/ontio/ontology/core/types"
 	utils2 "github.com/ontio/ontology/core/utils"
+	"github.com/ontio/ontology/merkle"
 )
+
+type DBKey byte
+
+const (
+	KEY_SERVER_STATE DBKey = 0x1
+)
+
+const (
+	SERVER_STATE_INIT           uint32 = 1
+	SERVER_STATE_DEPLOY_SUCCESS uint32 = 2
+	SERVER_STATE_CONTRACT_INIT  uint32 = 3
+	SERVER_STATE_CONFIG_RUN     uint32 = 4
+)
+
+func GetOtherKeyByHash(key DBKey) []byte {
+	sink := common.NewZeroCopySink(nil)
+	sink.WriteByte(byte(key))
+	sink.WriteHash(merkle.EMPTY_HASH)
+	return sink.Bytes()
+}
+
+func GetStateFromBytes(data []byte) (uint32, string, error) {
+	source := common.NewZeroCopySource(data)
+	res, eof := source.NextUint32()
+	if eof {
+		return 0, "", io.ErrUnexpectedEOF
+	}
+
+	hexAddress, _, irregular, eof := source.NextString()
+	if irregular || eof {
+		return 0, "", io.ErrUnexpectedEOF
+	}
+
+	return res, hexAddress, nil
+}
 
 type ServerConfig struct {
 	Walletname        string   `json:"walletname"`
@@ -37,29 +76,213 @@ type WitnessConfig struct {
 	AuthAddr  []string `json:"authaddr"`
 }
 
+type ConfigServer struct {
+	Signer       *sdk.Account
+	OntSdk       *sdk.OntologySdk
+	OwnerAddr    string
+	ServerConfig *ServerConfig
+	State        uint32
+	InitTx       *types.MutableTransaction
+	DB           *leveldbstore.LevelDBStore
+}
+
+func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPath string, walletpassword string) (*ConfigServer, error) {
+	var fixedConfig ServerConfig
+	var witnessConfig WitnessConfig
+	var configServer ConfigServer
+	var hexAddress string
+	var err error
+
+	// db init.
+	configServer.DB, err = leveldbstore.NewLevelDBStore(levelDBName)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer DB: %s", err)
+	}
+
+	data, err := configServer.DB.Get(GetOtherKeyByHash(KEY_SERVER_STATE))
+	if err != nil {
+		configServer.State = SERVER_STATE_INIT
+	} else {
+		configServer.State, hexAddress, err = GetStateFromBytes(data)
+	}
+
+	log.Infof("Server state %d", configServer.State)
+
+	// fixed config fill
+	buffFixed, err := ioutil.ReadFile(fixedConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer: %s", err)
+	}
+
+	err = json.Unmarshal([]byte(buffFixed), &fixedConfig)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer: %s", err)
+	}
+
+	log.Infof("config fixed %v", &fixedConfig)
+
+	// witniess config fill
+	buffTenant, err := ioutil.ReadFile(witnessConfigPath)
+	err = json.Unmarshal([]byte(buffTenant), &witnessConfig)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer witnessConfig: %s", err)
+	}
+
+	_, err = common.AddressFromBase58(witnessConfig.OwnerAddr)
+	if err != nil {
+		return nil, fmt.Errorf("%s", err)
+	}
+
+	log.Infof("config witiness %v", &witnessConfig)
+
+	for _, addr := range witnessConfig.AuthAddr {
+		_, err = common.AddressFromBase58(addr)
+		if err != nil {
+			return nil, fmt.Errorf("NewConfigServer AddressFromBase58: %s", err)
+		}
+	}
+
+	// update AuthAddr. only ContracthexAddr not init
+	ontSdk := sdk.NewOntologySdk()
+	ontSdk.NewRpcClient().SetAddress(fixedConfig.OntNode)
+	fixedConfig.Authorize = append(fixedConfig.Authorize, witnessConfig.AuthAddr...)
+
+	configServer.OntSdk = ontSdk
+	configServer.ServerConfig = &fixedConfig
+	configServer.OwnerAddr = witnessConfig.OwnerAddr
+	configServer.ServerConfig.ContracthexAddr = hexAddress
+
+	// init signer.
+	wallet, err := ontSdk.OpenWallet(configServer.ServerConfig.Walletname)
+	if err != nil {
+		return nil, fmt.Errorf("error in OpenWallet:%s", err)
+	}
+
+	signer, err := wallet.GetAccountByAddress(configServer.ServerConfig.SignerAddress, []byte(walletpassword))
+	if err != nil {
+		return nil, fmt.Errorf("error in GetDefaultAccount:%s", err)
+	}
+
+	configServer.Signer = signer
+
+	return &configServer, nil
+}
+
 var (
-	runPath    = flag.String("runPath", "/data/", "runPath flag")
-	configPath = flag.String("configPath", "/appconfig/", "configPath flag")
-	prefixdir  string
+	runPath      = flag.String("runPath", "/data/", "runPath flag")
+	configPath   = flag.String("configPath", "/appconfig/", "configPath flag")
+	contractPath = flag.String("contractPath", "/wasm/", "contractPath flag")
 )
 
-func constructInitTransation(ontSdk *sdk.OntologySdk, config *ServerConfig, signer *sdk.Account) (*types.MutableTransaction, error) {
-	owner, err := common.AddressFromBase58(config.SignerAddress)
+func (self *ConfigServer) SendInitTx() error {
+	checkcount := uint32(0)
+	for {
+		_, err := self.OntSdk.SendTransaction(self.InitTx)
+		if err != nil {
+			if checkcount < 1000 {
+				fmt.Printf("SendTransaction init failed %s. try again.", err)
+				checkcount += 1
+				time.Sleep(3 * time.Second)
+				continue
+			}
+			return fmt.Errorf("SendTransaction init failed %s", err)
+		}
+		self.OntSdk.WaitForGenerateBlock(30 * time.Second)
+		break
+	}
+
+	return nil
+}
+
+func (self *ConfigServer) UpdateConfigRun(configRunFile string) error {
+	DefConfig := self.ServerConfig
+	if DefConfig.ServerPort == 0 || DefConfig.CacheTime == 0 || len(DefConfig.Walletname) == 0 || len(DefConfig.SignerAddress) == 0 || len(DefConfig.OntNode) == 0 || len(DefConfig.ContracthexAddr) == 0 || len(DefConfig.Authorize) == 0 || DefConfig.BatchNum == 0 || DefConfig.SendTxInterval == 0 || DefConfig.TryChainInterval == 0 || DefConfig.SendTxSize == 0 {
+		return fmt.Errorf("serverconfig not set ok\n")
+	}
+
+	okconfig, err := json.Marshal(DefConfig)
+	if err != nil {
+		return fmt.Errorf("serverconfig Marshal err: %s", err)
+	}
+
+	err = ioutil.WriteFile(configRunFile, okconfig, 0644)
+	if err != nil {
+		return fmt.Errorf("WriteFile %s error: %s", configRunFile, err)
+	}
+
+	log.Infof("Success configRun path : %s\n %s\n", configRunFile, string(okconfig))
+	return nil
+}
+
+func (self *ConfigServer) UpdateStateAddress(state uint32, hexaddress string) error {
+	self.State = state
+	sink := common.NewZeroCopySink(nil)
+	sink.WriteUint32(self.State)
+	sink.WriteString(hexaddress)
+	return self.DB.Put(GetOtherKeyByHash(KEY_SERVER_STATE), sink.Bytes())
+}
+
+func (self *ConfigServer) constructInitTransation(contracthexAddr string) (*types.MutableTransaction, error) {
+	self.ServerConfig.ContracthexAddr = contracthexAddr
+	owner, err := common.AddressFromBase58(self.ServerConfig.SignerAddress)
 	if err != nil {
 		return nil, err
 	}
-	contractAddress, err := common.AddressFromHexString(config.ContracthexAddr)
+	contractAddress, err := common.AddressFromHexString(contracthexAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	gasPrice := config.GasPrice
+	gasPrice := self.ServerConfig.GasPrice
 
 	args := make([]interface{}, 2)
 	args[0] = "set_owner"
 	args[1] = owner
 
-	return getTxWithArgs(ontSdk, args, gasPrice, contractAddress, signer)
+	tx, err := getTxWithArgs(self.OntSdk, args, gasPrice, contractAddress, self.Signer)
+	if err != nil {
+		return nil, err
+	}
+
+	self.InitTx = tx
+	return tx, nil
+}
+
+func (self *ConfigServer) DeployNewContract(wasmfile string) (string, error) {
+	codeHash, contracthexAddr, err := GetContractStringAndAddressByfile(wasmfile)
+	if err != nil {
+		return "", err
+	}
+
+	if checkContractExist(self.OntSdk, contracthexAddr, 3) {
+		return "", fmt.Errorf("contracthexAddr %s already exist. change another Owner", contracthexAddr)
+	}
+
+	deploygaslimit := uint64(200000000)
+	_, err = self.OntSdk.WasmVM.DeployWasmVMSmartContract(
+		self.ServerConfig.GasPrice,
+		deploygaslimit,
+		self.Signer,
+		codeHash,
+		"witness contract",
+		"1.0",
+		"author",
+		"email",
+		"desc",
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("error in DeployWasmVMSmartContract:%s", err)
+	}
+
+	self.OntSdk.WaitForGenerateBlock(500 * time.Second)
+
+	if !checkContractExist(self.OntSdk, contracthexAddr, 100) {
+		return "", fmt.Errorf("contracthexAddr %s not exist", contracthexAddr)
+	}
+	fmt.Printf("DeployNewContract: %s success.", contracthexAddr)
+
+	return contracthexAddr, nil
 }
 
 func getTxWithArgs(ontSdk *sdk.OntologySdk, args []interface{}, gasPrice uint64, contractAddress common.Address, signer *sdk.Account) (*types.MutableTransaction, error) {
@@ -76,178 +299,101 @@ func getTxWithArgs(ontSdk *sdk.OntologySdk, args []interface{}, gasPrice uint64,
 
 func main() {
 	flag.Parse()
-	fmt.Printf("runPath : %s\n", *runPath)
-	fmt.Printf("runPath : %s\n", *configPath)
-	prefixdir = *runPath + "/"
-	configRun := prefixdir + "config.run.json"
-	configFromTenant := *configPath + "/config.json"
+	log.Infof("runPath : %s\n", *runPath)
+	log.Infof("runPath : %s\n", *configPath)
+	log.Infof("runPath : %s\n", *contractPath)
+	prefixRunDir := *runPath + "/"
+	prefixConfigDir := *configPath + "/"
+	prefixContractDir := *contractPath + "/"
+
+	configRunFile := prefixRunDir + "config.run.json"
+	configFromTenant := prefixConfigDir + "config.json"
+	contractname := prefixContractDir + "contract.wasm"
+	dbPathName := prefixRunDir + "configleveldb"
 	configFixed := "config.fixed.json"
-	newcontractbash := "newcontract.bash"
-	newcontractname := "contract.wasm"
-	walletfixpasswd := "123456"
 
-	var configStore WitnessConfig
-	var DefConfig ServerConfig
-	configBuff, err := ioutil.ReadFile(configFromTenant)
-	err = json.Unmarshal([]byte(configBuff), &configStore)
+	passwd, err := password.GetAccountPassword()
 	if err != nil {
-		fmt.Printf("Unmarshal configStore: %s", err)
+		log.Errorf("input password error %s", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("configStore: %s\n", string(configBuff))
-
-	_, err = common.AddressFromBase58(configStore.OwnerAddr)
-	if err != nil {
-		fmt.Printf("%s", err)
-		os.Exit(1)
-	}
-
-	for _, addr := range configStore.AuthAddr {
-		_, err = common.AddressFromBase58(addr)
+	server, err := NewConfigServer(dbPathName, configFixed, configFromTenant, string(passwd))
+	switch server.State {
+	case SERVER_STATE_INIT:
+		// deploy contract.
+		contracthexAddr, err := server.DeployNewContract(contractname)
 		if err != nil {
-			fmt.Printf("%s", err)
+			log.Errorf("deploy contract %s failed", contracthexAddr)
 			os.Exit(1)
 		}
-	}
 
-	// config Run exist indicate just server restart
-	_, err = os.Stat(configRun)
-	if err != nil {
-		fmt.Printf("file %s not exist\n", configRun)
-		configfixedBuff, err := ioutil.ReadFile(configFixed)
+		err = server.UpdateStateAddress(SERVER_STATE_DEPLOY_SUCCESS, contracthexAddr)
 		if err != nil {
-			fmt.Printf("%s", err)
+			log.Errorf("sould panic. PutState failed %s", err)
 			os.Exit(1)
 		}
 
-		err = json.Unmarshal([]byte(configfixedBuff), &DefConfig)
+		// init tx
+		_, err = server.constructInitTransation(contracthexAddr)
 		if err != nil {
-			fmt.Printf("%s", err)
+			log.Errorf("NewConfigServer init tx: %s", err)
 			os.Exit(1)
 		}
 
-		ontSdk := sdk.NewOntologySdk()
-		ontSdk.NewRpcClient().SetAddress(DefConfig.OntNode)
-
-		// construct new rust contract and compile. deploy
-		buildCmd := exec.Command("bash", newcontractbash, configStore.OwnerAddr)
-		err = buildCmd.Run()
+		err = server.SendInitTx()
 		if err != nil {
-			fmt.Printf("build contract err: %s", err)
+			log.Errorf("contract %s init failed", contracthexAddr)
 			os.Exit(1)
 		}
-		_, contracthexAddr, err := GetContractStringAndAddressByfile(newcontractname)
+
+		err = server.UpdateStateAddress(SERVER_STATE_CONTRACT_INIT, contracthexAddr)
 		if err != nil {
-			fmt.Printf("get ContracthexAddr err: %s", err)
+			log.Errorf("sould panic. PutState failed %s", err)
 			os.Exit(1)
 		}
 
-		DefConfig.ContracthexAddr = contracthexAddr
-		DefConfig.Authorize = configStore.AuthAddr
-		err = WriteConfigRunJson(&DefConfig, configRun)
+		// update configRunFile.
+		err = server.UpdateConfigRun(configRunFile)
 		if err != nil {
-			fmt.Printf("WriteConfigRunJson err: %s", err)
-			os.Remove(configRun)
+			log.Errorf("Write %s Failed: %s", configRunFile, err)
+			os.Exit(1)
+		}
+	case SERVER_STATE_DEPLOY_SUCCESS:
+		if !checkContractExist(server.OntSdk, server.ServerConfig.ContracthexAddr, 3) {
+			log.Errorf("SERVER_STATE_DEPLOY_SUCCESS restart contracthexAddr %s not exist", server.ServerConfig.ContracthexAddr)
 			os.Exit(1)
 		}
 
-		signer, err := initSigner(ontSdk, &DefConfig, walletfixpasswd)
+		// send init
+		_, err = server.constructInitTransation(server.ServerConfig.ContracthexAddr)
 		if err != nil {
-			fmt.Printf("initSigner err: %s", err)
-			os.Remove(configRun)
+			log.Errorf("SERVER_STATE_DEPLOY_SUCCES SNewConfigServer init tx: %s", err)
 			os.Exit(1)
 		}
 
-		initx, err := constructInitTransation(ontSdk, &DefConfig, signer)
+		err = server.SendInitTx()
 		if err != nil {
-			fmt.Printf("constructInitTransation failed %s", err)
-			os.Remove(configRun)
+			log.Errorf("SERVER_STATE_DEPLOY_SUCCESS contract %s init failed", server.ServerConfig.ContracthexAddr)
 			os.Exit(1)
 		}
 
-		_, err = DeployNewContract(ontSdk, newcontractname, &DefConfig, signer)
+		err = server.UpdateStateAddress(SERVER_STATE_CONTRACT_INIT, server.ServerConfig.ContracthexAddr)
 		if err != nil {
-			fmt.Printf("DeployNewContract failed %s", err)
-			os.Remove(configRun)
+			log.Errorf("SERVER_STATE_DEPLOY_SUCCESS sould panic. PutState failed %s", err)
 			os.Exit(1)
 		}
 
-		checkcount := uint32(0)
-		for {
-			_, err = ontSdk.SendTransaction(initx)
-			if err != nil {
-				if checkcount < 1000 {
-					fmt.Printf("SendTransaction init failed %s. try again.", err)
-					checkcount += 1
-					time.Sleep(3 * time.Second)
-					continue
-				}
-				fmt.Printf("SendTransaction init failed %s", err)
-				os.Exit(1)
-			}
-			ontSdk.WaitForGenerateBlock(30 * time.Second)
-			break
-		}
-
-		fmt.Printf("contract deploy ok address :%s\n", contracthexAddr)
-	} else {
-		fmt.Printf("file %s exist\n", configRun)
-		configfixedBuff, err := ioutil.ReadFile(configRun)
+		err = server.UpdateConfigRun(configRunFile)
 		if err != nil {
-			fmt.Printf("%s", err)
-			os.Exit(1)
+			log.Errorf("SERVER_STATE_DEPLOY_SUCCESS Write %s Failed: %s", configRunFile, err)
 		}
-
-		err = json.Unmarshal([]byte(configfixedBuff), &DefConfig)
+	case SERVER_STATE_CONTRACT_INIT:
+		err = server.UpdateConfigRun(configRunFile)
 		if err != nil {
-			fmt.Printf("%s", err)
-			os.Exit(1)
-		}
-
-		ontSdk := sdk.NewOntologySdk()
-		ontSdk.NewRpcClient().SetAddress(DefConfig.OntNode)
-
-		if !checkContractExist(ontSdk, DefConfig.ContracthexAddr, 3) {
-			fmt.Printf("restart contracthexAddr %s not exist", DefConfig.ContracthexAddr)
-			os.Exit(1)
-		}
-
-		DefConfig.Authorize = configStore.AuthAddr
-		err = WriteConfigRunJson(&DefConfig, configRun)
-		if err != nil {
-			fmt.Printf("WriteConfigRunJson err: %s", err)
-			os.Exit(1)
+			log.Errorf("Write %s Failed: %s", configRunFile, err)
 		}
 	}
-}
-
-func UpdateConfigRunAuth(DefConfig *ServerConfig, configStore *WitnessConfig) {
-	DefConfig.Authorize = configStore.AuthAddr
-	fmt.Printf("server config %v\n", DefConfig)
-}
-
-func WriteConfigRunJson(DefConfig *ServerConfig, configRun string) error {
-	fmt.Printf("address %v\n", DefConfig.Authorize)
-	fmt.Printf("configRun: %v\n", DefConfig)
-	if DefConfig.ServerPort == 0 || DefConfig.CacheTime == 0 || len(DefConfig.Walletname) == 0 || len(DefConfig.SignerAddress) == 0 || len(DefConfig.OntNode) == 0 || len(DefConfig.ContracthexAddr) == 0 || len(DefConfig.Authorize) == 0 || DefConfig.BatchNum == 0 || DefConfig.SendTxInterval == 0 || DefConfig.TryChainInterval == 0 || DefConfig.SendTxSize == 0 {
-		return fmt.Errorf("serverconfig not set ok\n")
-	}
-
-	okconfig, err := json.Marshal(DefConfig)
-	if err != nil {
-		return fmt.Errorf("serverconfig Marshal err: %s", err)
-	}
-
-	fmt.Printf("configRun: %s\n", string(okconfig))
-	// set ok config to config.run.json
-	err = ioutil.WriteFile(configRun, okconfig, 0644)
-	if err != nil {
-		return fmt.Errorf("WriteFile %s error: %s", configRun, err)
-	}
-
-	fmt.Printf("%s: \n%s\n", configRun, string(okconfig))
-	return nil
 }
 
 func GetContractStringAndAddressByfile(wasmfile string) (string, string, error) {
@@ -265,54 +411,6 @@ func GetContractStringAndAddressByfile(wasmfile string) (string, string, error) 
 	return codeHash, contracthexAddr, nil
 }
 
-func initSigner(ontSdk *sdk.OntologySdk, newconfig *ServerConfig, walletpassword string) (*sdk.Account, error) {
-	wallet, err := ontSdk.OpenWallet(newconfig.Walletname)
-	if err != nil {
-		return nil, fmt.Errorf("error in OpenWallet:%s", err)
-	}
-
-	signer, err := wallet.GetAccountByAddress(newconfig.SignerAddress, []byte(walletpassword))
-	if err != nil {
-		return nil, fmt.Errorf("error in GetDefaultAccount:%s", err)
-	}
-
-	return signer, nil
-}
-
-func DeployNewContract(ontSdk *sdk.OntologySdk, wasmfile string, newconfig *ServerConfig, signer *sdk.Account) (string, error) {
-	codeHash, contracthexAddr, err := GetContractStringAndAddressByfile(wasmfile)
-	if checkContractExist(ontSdk, contracthexAddr, 3) {
-		return "", fmt.Errorf("contracthexAddr %s already exist. change another Owner", contracthexAddr)
-	}
-
-	fmt.Printf("start DeployNewContract: %s", contracthexAddr)
-	gasprice := newconfig.GasPrice
-	deploygaslimit := uint64(200000000)
-	_, err = ontSdk.WasmVM.DeployWasmVMSmartContract(
-		gasprice,
-		deploygaslimit,
-		signer,
-		codeHash,
-		"witness contract",
-		"1.0",
-		"author",
-		"email",
-		"desc",
-	)
-
-	if err != nil {
-		return "", fmt.Errorf("error in DeployWasmVMSmartContract:%s", err)
-	}
-
-	ontSdk.WaitForGenerateBlock(500 * time.Second)
-
-	if !checkContractExist(ontSdk, contracthexAddr, 100) {
-		return "", fmt.Errorf("contracthexAddr %s not exist", contracthexAddr)
-	}
-
-	return contracthexAddr, nil
-}
-
 func checkContractExist(ontSdk *sdk.OntologySdk, contracthexAddr string, n uint32) bool {
 	checkcount := uint32(0)
 	for {
@@ -321,7 +419,7 @@ func checkContractExist(ontSdk *sdk.OntologySdk, contracthexAddr string, n uint3
 			if checkcount < n {
 				fmt.Printf("GetSmartContract: %s\n", err)
 				checkcount += 1
-				time.Sleep(3 * time.Second)
+				time.Sleep(2 * time.Second)
 				continue
 			}
 
