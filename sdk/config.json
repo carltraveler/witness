@@ -1,7 +1,7 @@
 {
-	"url":"http://127.0.0.1:8080",
-	"addon_id":"123",
-	"tenant_id":"456",
+	"url": "http://107.150.112.175:2020/addon/attestation",
+	"addon_id":"17",
+	"tenant_id":"did:ont:ASScVypt7gbikopYxk4dCFwymvVmqqmUHs",
 	"wallet":"./wallet.dat",
 	"signer":"APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2"
 }
