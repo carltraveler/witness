@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ontio/ontology-crypto/keypair"
 	sdk "github.com/ontio/ontology-go-sdk"
 	"github.com/ontio/ontology-go-sdk/utils"
 	"github.com/ontio/ontology/common"
@@ -75,8 +76,8 @@ type ServerConfig struct {
 }
 
 type WitnessConfig struct {
-	AuthAddr []string `json:"authaddr"`
-	NetType  string   `json:"nettype"`
+	AuthPubKey []string `json:"authpubkey"`
+	NetType    string   `json:"nettype"`
 }
 
 type ConfigServer struct {
@@ -121,11 +122,18 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	log.Infof("config witiness %v", &witnessConfig)
 
-	for _, addr := range witnessConfig.AuthAddr {
-		_, err = common.AddressFromBase58(addr)
+	AuthAddrs := make([]string, 0)
+	for _, pub := range witnessConfig.AuthPubKey {
+		raw, err := common.HexToBytes(pub)
 		if err != nil {
 			return nil, fmt.Errorf("NewConfigServer AddressFromBase58: %s", err)
 		}
+		pubkey, err := keypair.DeserializePublicKey(raw)
+		if err != nil {
+			return nil, fmt.Errorf("NewConfigServer AddressFromBase58: %s", err)
+		}
+		addr := types.AddressFromPubKey(pubkey)
+		AuthAddrs = append(AuthAddrs, addr.ToBase58())
 	}
 
 	// fixed config fill
@@ -156,7 +164,7 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 	// update AuthAddr. only ContracthexAddr not init
 	ontSdk := sdk.NewOntologySdk()
 	ontSdk.NewRpcClient().SetAddress(fixedConfig.OntNode)
-	fixedConfig.Authorize = append(fixedConfig.Authorize, witnessConfig.AuthAddr...)
+	fixedConfig.Authorize = append(fixedConfig.Authorize, AuthAddrs...)
 
 	configServer.OntSdk = ontSdk
 	configServer.ServerConfig = &fixedConfig

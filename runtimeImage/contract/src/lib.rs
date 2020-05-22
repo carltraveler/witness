@@ -172,9 +172,9 @@ fn contract_destroy() -> bool {
     runtime::contract_delete();
 }
 
-fn verify_controller(ont_id: &[u8], index: U128) -> bool {
-    let res = ontid::verify_controller(ont_id, index);
-    EventBuilder::new().string("verify_controller").string(String::from_utf8_lossy(ont_id).to_string().as_str()).number(index).bool(res).notify();
+fn verify_signature(ont_id: &[u8], index: U128) -> bool {
+    let res = ontid::verify_signature(ont_id, index);
+    EventBuilder::new().string("verifySignature").string(String::from_utf8_lossy(ont_id).to_string().as_str()).number(index).bool(res).notify();
     res
 }
 
@@ -200,8 +200,8 @@ pub fn invoke() {
             let code = source.read().unwrap();
             sink.write(contract_migrate(code));
         }
-        b"verifyController" => {
-            sink.write(verify_controller(GUEST_ONTID, 2));
+        b"verifySignature" => {
+            sink.write(verify_signature(GUEST_ONTID, 2));
         }
         b"get_user" => {
             sink.write(OWNER_ADDRESS_AS_MARK)

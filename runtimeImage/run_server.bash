@@ -43,5 +43,5 @@ echo "depoy. init. and generate config.run.json."
 	echo "123456" | ./witness_server_daemon -l 2 --correctdatabase 2 -c config.run.json
 }
 
-echo "config failed. or server exit" | tee server_exit
+echo "config failed. or server exit" | tee $prefixworkdir/server_exit
 exit 1
