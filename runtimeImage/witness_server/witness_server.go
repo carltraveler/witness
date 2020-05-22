@@ -54,6 +54,7 @@ const (
 
 const (
 	levelDBName          string = "leveldb"
+	sigDBName            string = "sigDB"
 	fileHashStoreName    string = "filestore.db"
 	TxchCap              uint32 = 5000
 	fileHashAppendFailed string = "true"
@@ -196,6 +197,7 @@ type transferArg struct {
 
 var (
 	DefStore      *leveldbstore.LevelDBStore
+	sigDB         *leveldbstore.LevelDBStore
 	DefMerkleTree *merkle.CompactMerkleTree
 	DefSdk        *sdk.OntologySdk
 	DefVerifyTx   *types.MutableTransaction
@@ -235,19 +237,15 @@ func InitSigner() error {
 	return nil
 }
 
-func checkContontractAlreadyUsed(ontSdk *sdk.OntologySdk) error {
-	tx, err := contractVerifyTransaction(ontSdk)
-	if err != nil {
-		return err
-	}
-
+func getRoot(ontSdk *sdk.OntologySdk, tx *types.MutableTransaction) (common.Uint256, uint32, error) {
 	var result *sdkcom.PreExecResult
+	var err error
 	callCount := uint32(0)
 	for {
 		result, err = ontSdk.ClientMgr.PreExecTransaction(tx)
 		if err != nil {
-			if callCount > 2 {
-				return err
+			if callCount > 10 {
+				return merkle.EMPTY_HASH, 0, err
 			}
 			callCount++
 			time.Sleep(time.Second * 1)
@@ -257,17 +255,27 @@ func checkContontractAlreadyUsed(ontSdk *sdk.OntologySdk) error {
 	}
 	raw, err := result.Result.ToByteArray()
 	if err != nil {
-		return err
+		return merkle.EMPTY_HASH, 0, err
 	}
 	source := common.NewZeroCopySource(raw)
-	_, eof := source.NextHash()
+	root, eof := source.NextHash()
 	if eof {
-		return errors.New("checkContontractAlreadyUsed: error decode root hash.")
+		return merkle.EMPTY_HASH, 0, errors.New("getRoot: error decode root hash.")
 	}
 	size, eof := source.NextUint32()
 	if eof {
-		return errors.New("checkContontractAlreadyUsed: error decode root size.")
+		return merkle.EMPTY_HASH, 0, errors.New("getRoot: error decode root size.")
 	}
+
+	return root, size, nil
+}
+
+func checkContontractAlreadyUsed(ontSdk *sdk.OntologySdk) error {
+	_, size, err := getRoot(ontSdk, DefVerifyTx)
+	if err != nil {
+		return err
+	}
+
 	if size != 0 {
 		return fmt.Errorf("checkContontractAlreadyUsed: chain merkle tree size: %d", size)
 	}
@@ -278,6 +286,11 @@ func checkContontractAlreadyUsed(ontSdk *sdk.OntologySdk) error {
 
 func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 	var err error
+	sigDB, err = leveldbstore.NewLevelDBStore(sigDBName)
+	if err != nil {
+		return err
+	}
+
 	cMTree := &merkle.CompactMerkleTree{}
 	DefStore, err = leveldbstore.NewLevelDBStore(levelDBName)
 	if err != nil {
@@ -325,6 +338,11 @@ func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 	DefSdk = sdk.NewOntologySdk()
 	DefSdk.NewRpcClient().SetAddress(DefConfig.OntNode)
 
+	DefVerifyTx, err = contractVerifyTransaction(DefSdk)
+	if err != nil {
+		return err
+	}
+
 	_, err = DefStore.Get(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH))
 	if err != nil {
 		// localHeight not init. first time init.
@@ -336,13 +354,21 @@ func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 				return err
 			}
 		}
+
+		sink := common.NewZeroCopySink(nil)
+		sink.WriteUint32(uint32(0))
+		err := sigDB.Put([]byte(sigDataIndexKey), sink.Bytes())
+		if err != nil {
+			return err
+		}
+
 		// init contractAddress
 		err = DefStore.Put(GetKeyByHash(PREFIX_CONTRACT_ADDRESS, merkle.EMPTY_HASH), contractAddress[:])
 		if err != nil {
 			return err
 		}
 
-		// check the chain contract if already used.
+		// init blockHeight
 		for {
 			blockHeight, err := DefSdk.GetCurrentBlockHeight()
 			if err != nil || blockHeight == 0 {
@@ -1252,7 +1278,7 @@ func (self *VerifyResult) UnmarshalJSON(buf []byte) error {
 		return err
 	}
 
-	proof, err := convertParamsToLeafs(res.Proof)
+	proof, _, err := convertParamsToLeafs(res.Proof)
 	if err != nil {
 		return err
 	}
@@ -1417,6 +1443,10 @@ func startOGQServer(ctx *cli.Context) error {
 			return err
 		}
 
+		if sigDB == nil {
+			return errors.New("sigDB nil. init failed.")
+		}
+		go StoreSigData(sigDataChan, sigDB)
 		go RoutineOfSendTx()
 	}
 
@@ -1458,19 +1488,36 @@ func StartRPCServer() error {
 	return nil
 }
 
-func convertParamsToLeafs(params []string) ([]common.Uint256, error) {
+func convertParamsToLeafs(params []string) ([]common.Uint256, []byte, error) {
 	leafs := make([]common.Uint256, len(params), len(params))
+	verifyData := make([]byte, 0, len(params)*common.UINT256_SIZE)
 
 	for i := uint32(0); i < uint32(len(params)); i++ {
 		s := params[i]
 		leaf, err := HashFromHexString(s)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		leafs[i] = leaf
+		verifyData = append(verifyData, leaf[:]...)
 	}
 
-	return leafs, nil
+	return leafs, verifyData, nil
+}
+
+func getRawDataForVerifySig(hashes []string) ([]byte, error) {
+	verifyData := make([]byte, 0, len(hashes)*32)
+
+	for i := uint32(0); i < uint32(len(hashes)); i++ {
+		s := hashes[i]
+		leaf, err := HashFromHexString(s)
+		if err != nil {
+			return nil, err
+		}
+		verifyData = append(verifyData, leaf[:]...)
+	}
+
+	return verifyData, nil
 }
 
 func rpcVerify(vargs *RpcParam) map[string]interface{} {
@@ -1552,6 +1599,171 @@ func getPublicSigData(pubs string, sigs string) (keypair.PublicKey, []byte, erro
 	return pubkey, sigData, nil
 }
 
+const (
+	sigDataIndexKey  = "sigDataIndexKey"
+	sigDataKeyPrefix = "sigDataKey"
+)
+
+var (
+	sigDataChan = make(chan *RpcParam, 256)
+	sigQuitChan = make(chan bool)
+)
+
+func getSigDataIndex(sigDB *leveldbstore.LevelDBStore) (uint32, error) {
+	raw, err := sigDB.Get([]byte(sigDataIndexKey))
+	if err != nil {
+		return 0, err
+	}
+	source := common.NewZeroCopySource(raw)
+	index, eof := source.NextUint32()
+	if eof {
+		return 0, errors.New("getSigDataIndex eof error.")
+	}
+
+	return index, nil
+}
+
+func putSigDataIndex(sigDB *leveldbstore.LevelDBStore, index uint32) {
+	sink := common.NewZeroCopySink(nil)
+	sink.WriteUint32(index)
+	sigDB.BatchPut([]byte(sigDataIndexKey), sink.Bytes())
+}
+
+func putSigData(store *leveldbstore.LevelDBStore, sigData *RpcParam) (uint32, error) {
+	index, err := getSigDataIndex(store)
+	if err != nil {
+		return 0, err
+	}
+	index++
+	// update index
+	putSigDataIndex(store, index)
+
+	// value bytes
+	sink := common.NewZeroCopySink(nil)
+	sink.WriteString(sigData.PubKey)
+	sink.WriteString(sigData.Sigature)
+	for _, h := range sigData.Hashes {
+		sink.WriteString(h)
+	}
+
+	// key bytes.
+	sinkey := common.NewZeroCopySink(nil)
+	sinkey.WriteUint32(index)
+
+	keybytes := make([]byte, 0)
+	prefixbytes := []byte(sigDataKeyPrefix)
+	keybytes = append(keybytes, prefixbytes...)
+	keybytes = append(keybytes, sinkey.Bytes()...)
+
+	store.BatchPut(keybytes, sink.Bytes())
+	err = store.BatchCommit()
+	if err != nil {
+		return 0, err
+	}
+	return index, nil
+}
+
+func verifySigIndex(store *leveldbstore.LevelDBStore, index uint32) error {
+	// key bytes.
+	sinkey := common.NewZeroCopySink(nil)
+	sinkey.WriteUint32(index)
+	keybytes := make([]byte, 0)
+	prefixbytes := []byte(sigDataKeyPrefix)
+	keybytes = append(keybytes, prefixbytes...)
+	keybytes = append(keybytes, sinkey.Bytes()...)
+
+	// get value.
+	raw, err := store.Get(keybytes)
+	if err != nil {
+		return err
+	}
+	source := common.NewZeroCopySource(raw)
+	pks, _, irregular, eof := source.NextString()
+	sigData, _, irregular, eof := source.NextString()
+	if irregular || eof {
+		return errors.New("wrong decode pks")
+	}
+	hashes := make([]string, 0)
+	for {
+		h, _, irregular, eof := source.NextString()
+		if eof || irregular {
+			break
+		}
+		hashes = append(hashes, h)
+	}
+	pubkeyraw, sigDataraw, err := getPublicSigData(pks, sigData)
+	if err != nil {
+		return err
+	}
+	_, verifyData, err := convertParamsToLeafs(hashes)
+	err = signature.Verify(pubkeyraw, verifyData, sigDataraw)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func StoreSigData(sigDataChan chan *RpcParam, sigDB *leveldbstore.LevelDBStore) {
+	for {
+		select {
+		case <-sigQuitChan:
+			return
+		case data := <-sigDataChan:
+			var store leveldbstore.LevelDBStore
+			store = *sigDB
+			store.NewBatch()
+			index, err := putSigData(&store, data)
+			if err != nil {
+				log.Errorf("StoreSigData: %s", err)
+			}
+			//err = verifySigIndex(&store, index)
+			//if err != nil {
+			//	log.Errorf("StoreSigData. Verify err: %s", err)
+			//}
+
+			log.Debugf("StoreSigData verify success %d", index)
+		}
+	}
+}
+
+func rpcGetContractAddress() map[string]interface{} {
+	var tmpContractAddr common.Address
+	addrByte, err := DefStore.Get(GetKeyByHash(PREFIX_CONTRACT_ADDRESS, merkle.EMPTY_HASH))
+	if err != nil {
+		return responseFailed(INVALID_PARAM, err.Error(), nil)
+	}
+	copy(tmpContractAddr[:], addrByte)
+	resAddress := tmpContractAddr.ToHexString()
+
+	log.Debugf("rpcGetContractAddress: contractAddress: %s", resAddress)
+	time.Sleep(time.Second * time.Duration(2))
+	return responseSuccess(resAddress)
+}
+
+type RootSize struct {
+	Root string `json:"root"`
+	Size uint32 `json:"size"`
+}
+
+func rpcGetRoot() map[string]interface{} {
+	if SystemOutOfService {
+		return responsePack(NODE_OUTSERVICE, "Out of Service")
+	}
+	root, size, err := getRoot(DefSdk, DefVerifyTx)
+	if err != nil {
+		return responseFailed(INVALID_PARAM, err.Error(), nil)
+	}
+
+	res := &RootSize{
+		Root: hex.EncodeToString(root[:]),
+		Size: size,
+	}
+
+	log.Debugf("rpcGetRoot: root: %s, %d", res.Root, res.Size)
+	return responseSuccess(res)
+}
+
 const maxDeclineNum uint32 = 512
 
 func rpcBatchAdd(addargs *RpcParam) map[string]interface{} {
@@ -1577,13 +1789,13 @@ func rpcBatchAdd(addargs *RpcParam) map[string]interface{} {
 		return responsePack(INVALID_PARAM, "too much or empty hashes")
 	}
 
-	hashes, err := convertParamsToLeafs(params)
+	hashes, verifyData, err := convertParamsToLeafs(params)
 	if err != nil {
 		log.Infof("batch add convert params err: %s\n", err)
 		return responsePack(INVALID_PARAM, err.Error())
 	}
 
-	err = signature.Verify(pubkey, hashes[0][:], sigData)
+	err = signature.Verify(pubkey, verifyData, sigData)
 	if err != nil {
 		return responsePack(NO_AUTH, "Verify failed. sigData not right.")
 	}
@@ -1597,6 +1809,8 @@ func rpcBatchAdd(addargs *RpcParam) map[string]interface{} {
 			return responseFailed(ADDHASH_FAILED, err.Error(), dup)
 		}
 	}
+
+	sigDataChan <- addargs
 
 	if DefConfig.BatchAddSleepTime != 0 {
 		time.Sleep(time.Second * time.Duration(DefConfig.BatchAddSleepTime))
@@ -1635,7 +1849,9 @@ func waitToExit(ctx *cli.Context) {
 		for sig := range sc {
 			log.Infof("OGQ server received exit signal: %v.", sig.String())
 			SystemOutOfService = true
+			time.Sleep(time.Second * time.Duration(10))
 			cacheQuitChannel <- true
+			sigQuitChan <- true
 			close(SendTxChannel)
 			wg.Wait()
 			log.Info("Now exit")

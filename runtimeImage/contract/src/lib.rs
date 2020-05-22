@@ -4,6 +4,7 @@ extern crate ontio_std as ostd;
 use ostd::abi::{Encoder, EventBuilder, Sink, Source};
 use ostd::macros::base58;
 use ostd::prelude::*;
+use ostd::contract::ontid;
 use ostd::{database, runtime};
 
 use staticvec::StaticVec;
@@ -99,6 +100,7 @@ const MERKLETREE_KEY: &[u8] = b"m";
 const ADMIN: Address = base58!("APHNPLz2u1JUXyD8rhryLaoQrW46J3P6y2");
 #[allow(dead_code)]
 const OWNER_ADDRESS_AS_MARK: Address = base58!("Ab1z3Sxy7ovn4AuScdmMh4PRMvcwCMzSNV");
+const GUEST_ONTID: &[u8] = b"did:ont:Ab1z3Sxy7ovn4AuScdmMh4PRMvcwCMzSNV";
 
 fn get_root_inner(ogq_tree: &CompactMerkleTree) -> H256 {
     if ogq_tree.hashes.len() != 0 {
@@ -138,7 +140,7 @@ fn batch_add(hash_list: &[&H256]) -> bool {
     store_merkletree(&ogq_tree);
     let root = get_root_inner(&ogq_tree);
     EventBuilder::new()
-        .h256(root)
+        .h256(&root)
         .number(ogq_tree.tree_size as u128).notify();
     return true;
 }
@@ -151,7 +153,7 @@ fn get_root() -> RootSize {
         tree_size: ogq_tree.tree_size,
     };
     EventBuilder::new()
-        .h256(root)
+        .h256(&root)
         .number(ogq_tree.tree_size as u128)
         .notify();
     return root_size;
@@ -168,6 +170,12 @@ fn contract_migrate(code: &[u8]) -> bool {
 fn contract_destroy() -> bool {
     assert!(runtime::check_witness(&ADMIN));
     runtime::contract_delete();
+}
+
+fn verify_controller(ont_id: &[u8], index: U128) -> bool {
+    let res = ontid::verify_controller(ont_id, index);
+    EventBuilder::new().string("verify_controller").string(String::from_utf8_lossy(ont_id).to_string().as_str()).number(index).bool(res).notify();
+    res
 }
 
 #[no_mangle]
@@ -191,6 +199,9 @@ pub fn invoke() {
         b"contract_migrate" => {
             let code = source.read().unwrap();
             sink.write(contract_migrate(code));
+        }
+        b"verifyController" => {
+            sink.write(verify_controller(GUEST_ONTID, 2));
         }
         b"get_user" => {
             sink.write(OWNER_ADDRESS_AS_MARK)

@@ -13,7 +13,6 @@ import (
 	"github.com/ontio/ontology-go-sdk/utils"
 	"github.com/ontio/ontology/common"
 	"github.com/ontio/ontology/common/log"
-	"github.com/ontio/ontology/common/password"
 	"github.com/ontio/ontology/core/store/leveldbstore"
 	"github.com/ontio/ontology/core/types"
 	utils2 "github.com/ontio/ontology/core/utils"
@@ -24,6 +23,10 @@ type DBKey byte
 
 const (
 	KEY_SERVER_STATE DBKey = 0x1
+)
+
+const (
+	walletname = "wallet.dat"
 )
 
 const (
@@ -72,8 +75,8 @@ type ServerConfig struct {
 }
 
 type WitnessConfig struct {
-	OwnerAddr string   `json:"owneraddr"`
-	AuthAddr  []string `json:"authaddr"`
+	AuthAddr []string `json:"authaddr"`
+	NetType  string   `json:"nettype"`
 }
 
 type ConfigServer struct {
@@ -83,10 +86,11 @@ type ConfigServer struct {
 	ServerConfig *ServerConfig
 	State        uint32
 	InitTx       *types.MutableTransaction
+	VerifyTx     *types.MutableTransaction
 	DB           *leveldbstore.LevelDBStore
 }
 
-func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPath string, walletpassword string) (*ConfigServer, error) {
+func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPath string, prefixRunDir string) (*ConfigServer, error) {
 	var fixedConfig ServerConfig
 	var witnessConfig WitnessConfig
 	var configServer ConfigServer
@@ -108,29 +112,11 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	log.Infof("Server state %d", configServer.State)
 
-	// fixed config fill
-	buffFixed, err := ioutil.ReadFile(fixedConfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("NewConfigServer: %s", err)
-	}
-
-	err = json.Unmarshal([]byte(buffFixed), &fixedConfig)
-	if err != nil {
-		return nil, fmt.Errorf("NewConfigServer: %s", err)
-	}
-
-	log.Infof("config fixed %v", &fixedConfig)
-
 	// witniess config fill
 	buffTenant, err := ioutil.ReadFile(witnessConfigPath)
 	err = json.Unmarshal([]byte(buffTenant), &witnessConfig)
 	if err != nil {
 		return nil, fmt.Errorf("NewConfigServer witnessConfig: %s", err)
-	}
-
-	_, err = common.AddressFromBase58(witnessConfig.OwnerAddr)
-	if err != nil {
-		return nil, fmt.Errorf("%s", err)
 	}
 
 	log.Infof("config witiness %v", &witnessConfig)
@@ -142,6 +128,31 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 		}
 	}
 
+	// fixed config fill
+	buffFixed, err := ioutil.ReadFile(fixedConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer: %s", err)
+	}
+
+	err = json.Unmarshal([]byte(buffFixed), &fixedConfig)
+	if err != nil {
+		return nil, fmt.Errorf("NewConfigServer: %s", err)
+	}
+
+	var ismainnet bool
+
+	if witnessConfig.NetType == "testnet" {
+		fixedConfig.OntNode = "http://polaris1.ont.io:20336"
+		ismainnet = false
+	} else if witnessConfig.NetType == "mainnet" {
+		fixedConfig.OntNode = "http://dappnode2.ont.io:20336"
+		ismainnet = true
+	} else {
+		return nil, fmt.Errorf("NewConfigServer wrong nettype :%s", witnessConfig.NetType)
+	}
+
+	log.Infof("config fixed %v", &fixedConfig)
+
 	// update AuthAddr. only ContracthexAddr not init
 	ontSdk := sdk.NewOntologySdk()
 	ontSdk.NewRpcClient().SetAddress(fixedConfig.OntNode)
@@ -149,29 +160,43 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	configServer.OntSdk = ontSdk
 	configServer.ServerConfig = &fixedConfig
-	configServer.OwnerAddr = witnessConfig.OwnerAddr
 	configServer.ServerConfig.ContracthexAddr = hexAddress
 
+	wallresp, err := RequestForWallet(ismainnet)
+	if err != nil {
+		return nil, err
+	}
+
+	configServer.ServerConfig.Walletname = walletname
+	sigwalletplace := prefixRunDir + walletname
+	err = ioutil.WriteFile(sigwalletplace, []byte(wallresp.Content), 0644)
+	if err != nil {
+		log.Errorf("write wallet err: %s", err)
+		return nil, err
+	}
+
 	// init signer.
-	wallet, err := ontSdk.OpenWallet(configServer.ServerConfig.Walletname)
+	wallet, err := ontSdk.OpenWallet(sigwalletplace)
 	if err != nil {
 		return nil, fmt.Errorf("error in OpenWallet:%s", err)
 	}
 
-	signer, err := wallet.GetAccountByAddress(configServer.ServerConfig.SignerAddress, []byte(walletpassword))
+	signer, err := wallet.GetDefaultAccount([]byte(wallresp.Passwd))
 	if err != nil {
 		return nil, fmt.Errorf("error in GetDefaultAccount:%s", err)
 	}
 
 	configServer.Signer = signer
+	configServer.ServerConfig.SignerAddress = signer.Address.ToHexString()
+	log.Infof("config run start %v", &configServer.ServerConfig)
 
 	return &configServer, nil
 }
 
 var (
-	runPath      = flag.String("runPath", "/data/", "runPath flag")
-	configPath   = flag.String("configPath", "/appconfig/", "configPath flag")
-	contractPath = flag.String("contractPath", "/wasm/", "contractPath flag")
+	runPath      = flag.String("runPath", "./data/", "runPath flag")
+	configPath   = flag.String("configPath", "./appconfig/", "configPath flag")
+	contractPath = flag.String("contractPath", "./wasm/", "contractPath flag")
 )
 
 func (self *ConfigServer) SendInitTx() error {
@@ -248,6 +273,32 @@ func (self *ConfigServer) constructInitTransation(contracthexAddr string) (*type
 	return tx, nil
 }
 
+func (self *ConfigServer) constructverifytx(contracthexAddr string) (*types.MutableTransaction, error) {
+	self.ServerConfig.ContracthexAddr = contracthexAddr
+	//owner, err := common.AddressFromBase58(self.ServerConfig.SignerAddress)
+	//if err != nil {
+	//	return nil, err
+	//}
+	contractAddress, err := common.AddressFromHexString(contracthexAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	gasPrice := self.ServerConfig.GasPrice
+
+	args := make([]interface{}, 1)
+	args[0] = "get_root"
+
+	tx, err := getTxWithArgs(self.OntSdk, args, gasPrice, contractAddress, self.Signer)
+	if err != nil {
+		return nil, err
+	}
+
+	self.VerifyTx = tx
+
+	return tx, nil
+}
+
 func (self *ConfigServer) DeployNewContract(wasmfile string) (string, error) {
 	codeHash, contracthexAddr, err := GetContractStringAndAddressByfile(wasmfile)
 	if err != nil {
@@ -312,13 +363,11 @@ func main() {
 	dbPathName := prefixRunDir + "configleveldb"
 	configFixed := "config.fixed.json"
 
-	passwd, err := password.GetAccountPassword()
+	server, err := NewConfigServer(dbPathName, configFixed, configFromTenant, prefixRunDir)
 	if err != nil {
-		log.Errorf("input password error %s", err)
+		log.Errorf("NewConfigServer err: %s", err)
 		os.Exit(1)
 	}
-
-	server, err := NewConfigServer(dbPathName, configFixed, configFromTenant, string(passwd))
 	switch server.State {
 	case SERVER_STATE_INIT:
 		// deploy contract.

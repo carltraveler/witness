@@ -40,10 +40,10 @@ type ClientConfig struct {
 
 //JsonRpcRequest object in rpc
 type JsonRpcRequest struct {
-	Version string   `json:"jsonrpc"`
-	Id      string   `json:"id"`
-	Method  string   `json:"method"`
-	Params  RpcParam `json:"params"`
+	Version string    `json:"jsonrpc"`
+	Id      string    `json:"id"`
+	Method  string    `json:"method"`
+	Params  *RpcParam `json:"params"`
 }
 
 //JsonRpcResponse object response for JsonRpcRequest
@@ -59,6 +59,25 @@ type JsonRpcVerifyResponse struct {
 	Error  int64        `json:"error"`
 	Desc   string       `json:"desc"`
 	Result VerifyResult `json:"result"`
+}
+
+type JsonGetRootResponse struct {
+	Id     string   `json:"id"`
+	Error  int64    `json:"error"`
+	Desc   string   `json:"desc"`
+	Result RootSize `json:"result"`
+}
+
+type JsonGetContractResponse struct {
+	Id     string `json:"id"`
+	Error  int64  `json:"error"`
+	Desc   string `json:"desc"`
+	Result string `json:"result"`
+}
+
+type RootSize struct {
+	Root string `json:"root"`
+	Size uint32 `json:"size"`
 }
 
 //RpcClient for ontology rpc api
@@ -95,7 +114,7 @@ func (this *RpcClient) GetNextQid() string {
 }
 
 //sendRpcRequest send Rpc request to ontology
-func (this *RpcClient) sendRpcRequest(clientConfig *ClientConfig, qid, method string, params RpcParam) (interface{}, error) {
+func (this *RpcClient) sendRpcRequest(clientConfig *ClientConfig, qid, method string, params *RpcParam) (interface{}, error) {
 	rpcReq := &JsonRpcRequest{
 		Version: JSON_RPC_VERSION,
 		Id:      qid,
@@ -148,6 +167,25 @@ func (this *RpcClient) sendRpcRequest(clientConfig *ClientConfig, qid, method st
 			return nil, fmt.Errorf("JsonRpcResponse error code:%d desc:%s", rpcRsp.Error, rpcRsp.Desc)
 		}
 		return &rpcRsp.Result, nil
+	} else if method == "getRoot" {
+		rpcRsp := &JsonGetRootResponse{}
+		err = json.Unmarshal(body, rpcRsp)
+		if rpcRsp.Error != 0 {
+			return nil, fmt.Errorf("JsonRpcResponse error code:%d desc:%s", rpcRsp.Error, rpcRsp.Desc)
+		}
+		log.Infof("Root: %s, size: %d", rpcRsp.Result.Root, rpcRsp.Result.Size)
+
+		return &rpcRsp.Result, nil
+	} else if method == "GetContractAddress" {
+		rpcRsp := &JsonGetContractResponse{}
+		err = json.Unmarshal(body, rpcRsp)
+		if rpcRsp.Error != 0 {
+			return nil, fmt.Errorf("JsonRpcResponse error code:%d desc:%s", rpcRsp.Error, rpcRsp.Desc)
+		}
+		log.Infof("Contract: %s", rpcRsp.Result)
+
+		return &rpcRsp.Result, nil
+
 	}
 
 	return nil, errors.New("error method")
@@ -156,7 +194,7 @@ func (this *RpcClient) sendRpcRequest(clientConfig *ClientConfig, qid, method st
 func verifyLeaf(clientConfig *ClientConfig, client *RpcClient, leafs []common.Uint256) error {
 	for i := uint32(0); i < uint32(len(leafs)); i++ {
 		vargs := getVerifyArgs(leafs[i])
-		res, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "verify", vargs)
+		res, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "verify", &vargs)
 		if err != nil {
 			return fmt.Errorf("verifyLeaf [%x] Failed: %s\n", leafs[i], err)
 		}
@@ -172,11 +210,11 @@ func verifyLeaf(clientConfig *ClientConfig, client *RpcClient, leafs []common.Ui
 }
 
 func sendtx(clientConfig *ClientConfig) {
-	//testUrl := "http://127.0.0.1:32339"
+	testUrl := "http://127.0.0.1:32339"
 	//testUrl := "http://127.0.0.1:32338"
 	//testUrl := "http://127.0.0.1:8080"
 	//testUrl := "https://attestation.ont.io"
-	client := NewRpcClient(clientConfig.Url)
+	client := NewRpcClient(testUrl)
 	SystemOut = false
 	wg.Add(1)
 	defer wg.Done()
@@ -190,10 +228,19 @@ func sendtx(clientConfig *ClientConfig) {
 		var leafs []common.Uint256
 		leafs = GenerateLeafv(uint32(0)+N*m, N)
 		addArgs := leafvToAddArgs(leafs)
+		_, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "getRoot", nil)
+		if err != nil {
+			panic(err)
+		}
+		_, err = client.sendRpcRequest(clientConfig, client.GetNextQid(), "GetContractAddress", nil)
+		if err != nil {
+			panic(err)
+		}
+
 		if verify {
 			verifyLeaf(clientConfig, client, leafs)
 		} else {
-			_, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "batchAdd", addArgs)
+			_, err := client.sendRpcRequest(clientConfig, client.GetNextQid(), "batchAdd", &addArgs)
 			if err != nil {
 				if k == 0 {
 					log.Errorf("Add Error: %s, added num: %d\n", err, 0)
@@ -219,16 +266,19 @@ var (
 var (
 	N        uint32 = 1
 	numbatch uint32 = 1
-	verify   bool   = false
+	verify   bool   = true
 )
 
 var (
 	configPath = flag.String("configPath", "./config.json", "configPath flag")
+	sigDBPath  = flag.String("sigDBpath", "None", "sigdb path")
 )
 
 func main() {
 	flag.Parse()
 	log.Infof("configPath: %s\n", *configPath)
+	var err error
+
 	var clientConfig ClientConfig
 
 	buffFixed, err := ioutil.ReadFile(*configPath)
@@ -306,12 +356,14 @@ type RpcParam struct {
 
 func leafvToAddArgs(leafs []common.Uint256) RpcParam {
 	leafargs := make([]string, 0, len(leafs))
+	verifyData := make([]byte, 0)
 
 	for i := range leafs {
 		leafargs = append(leafargs, hex.EncodeToString(leafs[i][:]))
+		verifyData = append(verifyData, leafs[i][:]...)
 	}
 
-	sigData, err := DefSigner.Sign(leafs[0][:])
+	sigData, err := DefSigner.Sign(verifyData)
 	if err != nil {
 		panic(err)
 	}
@@ -322,7 +374,7 @@ func leafvToAddArgs(leafs []common.Uint256) RpcParam {
 		Hashes:   leafargs,
 	}
 
-	err = signature.Verify(DefSigner.GetPublicKey(), leafs[0][:], sigData)
+	err = signature.Verify(DefSigner.GetPublicKey(), verifyData, sigData)
 	if err != nil {
 		panic(err)
 	}

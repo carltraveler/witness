@@ -78,6 +78,10 @@ func RpcHandle(w http.ResponseWriter, r *http.Request) {
 		response = rpcVerify(&request.Params)
 	} else if request.Method == "batchAdd" {
 		response = rpcBatchAdd(&request.Params)
+	} else if request.Method == "getRoot" {
+		response = rpcGetRoot()
+	} else if request.Method == "GetContractAddress" {
+		response = rpcGetContractAddress()
 	} else {
 		log.Warn("HTTP JSON RPC Handle - No function to call for ", request.Method)
 		response = responsePack(INVALID_PARAM, "wrong Method name.only verify or batchAdd")
