@@ -77,6 +77,8 @@ type ServerConfig struct {
 
 type WitnessConfig struct {
 	AuthPubKey []string `json:"authpubkey"`
+	TenantId   string   `json:"tenant_id"`
+	WalletName string   `json:"wallet_name"`
 	NetType    string   `json:"nettype"`
 }
 
@@ -150,9 +152,11 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 	var ismainnet bool
 
 	if witnessConfig.NetType == "testnet" {
+		log.Infof("nettype: testnet")
 		fixedConfig.OntNode = "http://polaris1.ont.io:20336"
 		ismainnet = false
 	} else if witnessConfig.NetType == "mainnet" {
+		log.Infof("nettype: mainnet")
 		fixedConfig.OntNode = "http://dappnode2.ont.io:20336"
 		ismainnet = true
 	} else {
@@ -170,7 +174,7 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 	configServer.ServerConfig = &fixedConfig
 	configServer.ServerConfig.ContracthexAddr = hexAddress
 
-	wallresp, err := RequestForWallet(ismainnet)
+	wallresp, err := RequestForWallet(ismainnet, witnessConfig.WalletName)
 	if err != nil {
 		return nil, err
 	}
@@ -189,14 +193,22 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 		return nil, fmt.Errorf("error in OpenWallet:%s", err)
 	}
 
+	//log.Infof("wallet info: %v", *wallresp)
+	log.Infof("Wallet open success.")
+
 	signer, err := wallet.GetDefaultAccount([]byte(wallresp.Passwd))
 	if err != nil {
 		return nil, fmt.Errorf("error in GetDefaultAccount:%s", err)
 	}
 
+	err = ioutil.WriteFile(prefixRunDir+"txtpswd.txt", []byte(wallresp.Passwd), 0644)
+	if err != nil {
+		return nil, fmt.Errorf("WriteFile %s error: %s", "txtpswd.txt", err)
+	}
+
 	configServer.Signer = signer
-	configServer.ServerConfig.SignerAddress = signer.Address.ToHexString()
-	log.Infof("config run start %v", &configServer.ServerConfig)
+	configServer.ServerConfig.SignerAddress = signer.Address.ToBase58()
+	log.Infof("config run start %v", configServer.ServerConfig)
 
 	return &configServer, nil
 }
@@ -381,7 +393,7 @@ func main() {
 		// deploy contract.
 		contracthexAddr, err := server.DeployNewContract(contractname)
 		if err != nil {
-			log.Errorf("deploy contract %s failed", contracthexAddr)
+			log.Errorf("deploy contract %s failed: %s", contracthexAddr, err)
 			os.Exit(1)
 		}
 

@@ -7,7 +7,7 @@ go build confighandle.go aksk.go req.go
 cd ..
 cd witness_server; go build witness_server.go rpc.go; mv witness_server witness_server_daemon;cd -
 
-cp confighandle $preparedir
+cp runtimeconfig/confighandle $preparedir
 cp witness_server/witness_server_daemon $preparedir
 
 cp config.fixed.json $preparedir

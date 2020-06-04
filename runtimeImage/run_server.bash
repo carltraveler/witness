@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -ex
+set -e
 
 prefixworkdir="/data/"
 appconfigdir="/appconfig/"
@@ -40,7 +40,9 @@ echo "depoy. init. and generate config.run.json."
 	#cp ./wallet.dat $prefixworkdir/
 	cp ./witness_server_daemon $prefixworkdir
 	cd $prefixworkdir
-	echo "123456" | ./witness_server_daemon -l 2 --correctdatabase 2 -c config.run.json
+	txt=$(cat txtpswd.txt)
+	rm -f txtpswd.txt
+	echo $txt | ./witness_server_daemon -l 2 --correctdatabase 2 -c config.run.json
 }
 
 echo "config failed. or server exit" | tee $prefixworkdir/server_exit

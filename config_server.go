@@ -1,14 +1,30 @@
 package main
 
 import (
+	"bytes"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	//"github.com/ontio/ontology/common/log"
+	"github.com/ontio/ontology-crypto/keypair"
 	"io/ioutil"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
+
+func NewClient() *http.Client {
+	tr := &http.Transport{ //x509: certificate signed by unknown authority
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: tr, //x509: certificate signed by unknown authority
+	}
+	return client
+}
 
 const (
 	MAX_REQUEST_BODY_SIZE = 1 << 10
@@ -55,8 +71,7 @@ const (
 )
 
 type WitnessConfig struct {
-	OwnerAddr string   `json:"owneraddr"`
-	AuthAddr  []string `json:"authaddr"`
+	AuthPubKey []string `json:"authpubkey"`
 }
 
 type ClientConfig struct {
@@ -64,7 +79,7 @@ type ClientConfig struct {
 	AddOnId  string `json:"addon_id"`
 	TenantId string `json:"tenant_id"`
 	Wallet   string `json:"wallet"`
-	Singer   string `json:"signer"`
+	Signer   string `json:"signer"`
 }
 
 type SdkResp struct {
@@ -76,6 +91,7 @@ type SdkInfo struct {
 	AddOnId  string `json:"addon_id"`
 	TenantId string `json:"tenant_id"`
 	Net      string `json:"net"`
+	Product  string `json:"product"`
 }
 
 type SdkConfig struct {
@@ -98,7 +114,9 @@ func ParseParamBody(c *gin.Context, params interface{}) error {
 }
 
 func GetWitnessConfig(c *gin.Context) {
-	var wconfig WitnessConfig
+	wconfig := &WitnessConfig{
+		AuthPubKey: make([]string, 0),
+	}
 	c.JSON(http.StatusOK, &wconfig)
 }
 
@@ -122,6 +140,24 @@ func PostSdkConfig(c *gin.Context) {
 		return
 	}
 
+	if len(con.Config.AuthPubKey) == 0 {
+		c.JSON(http.StatusOK, ResponseFailed(PARA_ERROR, errors.New("AuthPubKey can not empty"), nil))
+		return
+	}
+
+	for _, pub := range con.Config.AuthPubKey {
+		raw, err := hex.DecodeString(pub)
+		if err != nil {
+			c.JSON(http.StatusOK, ResponseFailed(PARA_ERROR, err, nil))
+			return
+		}
+		_, err = keypair.DeserializePublicKey(raw)
+		if err != nil {
+			c.JSON(http.StatusOK, ResponseFailed(PARA_ERROR, err, nil))
+			return
+		}
+	}
+
 	clientConfig := &ClientConfig{
 		Url:      url,
 		AddOnId:  con.Info.AddOnId,
@@ -130,10 +166,75 @@ func PostSdkConfig(c *gin.Context) {
 	fmt.Printf("ClientConfig %v\n", clientConfig)
 
 	sdkresp := &SdkResp{
-		SdkUrl:    "https://github.com/carltraveler/witness/blob/master/sdk/sdk.go",
+		SdkUrl:    "https://github.com/leej1012/witness-java-sdk",
 		SdkConfig: clientConfig,
 	}
+
+	ServerBack.Req <- &con
+
 	c.JSON(http.StatusOK, ResponseSuccess(sdkresp))
+}
+
+type CallBackServer struct {
+	Req chan *SdkConfig
+}
+
+var (
+	ServerBack *CallBackServer
+)
+
+func NewCallBackServer() *CallBackServer {
+	return &CallBackServer{
+		Req: make(chan *SdkConfig, 10),
+	}
+}
+
+type CallBackReq struct {
+	TenantId string `json:"tenantId"`
+	Owner    string `json:"owner"`
+	Net      string `json:"net"`
+}
+
+const (
+	callbacktest string = "http://test.microservice.ont.io/addon-server/api/v1/app/owner/change"
+	callbackmain string = "https://prod.microservice.ont.io/addon-server/api/v1/app/owner/change"
+)
+
+func (self *CallBackServer) Callback() {
+	client := NewClient()
+	for {
+		select {
+		case req := <-self.Req:
+			fmt.Printf("Callback start: %v\n", *req)
+			time.Sleep(10 * time.Second)
+			var posturl string
+			if req.Info.Product == testNetype {
+				posturl = callbacktest
+			} else if req.Info.Product == mainNetype {
+				posturl = callbackmain
+			} else {
+				fmt.Printf("Product type error %s", req.Info.Product)
+				break
+			}
+
+			reqC := &CallBackReq{
+				TenantId: req.Info.TenantId,
+				Owner:    req.Config.AuthPubKey[0],
+				Net:      req.Info.Net,
+			}
+
+			data, err := json.Marshal(reqC)
+
+			fmt.Printf("Callback Post url %s start %s\n", posturl, string(data))
+			resp, err := client.Post(posturl, "application/json", bytes.NewReader(data))
+			if err != nil {
+				fmt.Printf("callback post err %s", err)
+				break
+			}
+			fmt.Printf("CallBack Ok: %v\n", *req)
+			defer resp.Body.Close()
+		}
+	}
 }
 
 func NewRouter() *gin.Engine {
@@ -146,5 +247,7 @@ func NewRouter() *gin.Engine {
 
 func main() {
 	r := NewRouter()
+	ServerBack = NewCallBackServer()
+	go ServerBack.Callback()
 	r.Run(":8080")
 }
