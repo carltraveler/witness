@@ -1,7 +1,7 @@
 {
 	"walletname": "./wallet.dat",
 	"serverport": 8080,
-	"gasprice": 500,
+	"gasprice": 2500,
 	"cachetime": 10,
 	"batchnum": 20,
 	"trychaininterval": 2,

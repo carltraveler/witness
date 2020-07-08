@@ -893,12 +893,6 @@ func handleFileStoreFailed(err error, localHeight uint32) {
 }
 
 func GetChainRootTreeSize(event *sdkcom.SmartContactEvent) (common.Uint256, uint32, bool, error) {
-	if event.State == 0 {
-		log.Warnf("GetChainNotifyByTxHash: Check tx failed. may out of ong. charge your address with ong.")
-		// to stop all other gorouting. and must handled all other tx. in localHeight block. resend the failed tx again(of coures reconstruct the tx.)
-		return merkle.EMPTY_HASH, 0, true, nil
-	}
-
 	if len(event.Notify) == 0 {
 		return merkle.EMPTY_HASH, 0, false, fmt.Errorf("GetChainNotifyByTxHash: notify should not empty.")
 	}
@@ -913,6 +907,12 @@ func GetChainRootTreeSize(event *sdkcom.SmartContactEvent) (common.Uint256, uint
 
 	if txaddr != contractAddress {
 		return merkle.EMPTY_HASH, 0, false, fmt.Errorf("GetChainNotifyByTxHash: address %x not match address %x.", txaddr, contractAddress)
+	}
+
+	if event.State == 0 {
+		log.Warnf("GetChainNotifyByTxHash: hash: %s Check tx failed. may out of ong. charge your address with ong.", event.TxHash)
+		// to stop all other gorouting. and must handled all other tx. in localHeight block. resend the failed tx again(of coures reconstruct the tx.)
+		return merkle.EMPTY_HASH, 0, true, nil
 	}
 
 	switch val := event.Notify[0].States.(type) {
