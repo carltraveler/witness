@@ -153,7 +153,7 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	if witnessConfig.NetType == "testnet" {
 		log.Infof("nettype: testnet")
-		fixedConfig.OntNode = "http://polaris1.ont.io:20336"
+		fixedConfig.OntNode = "http://polaris2.ont.io:20336"
 		ismainnet = false
 	} else if witnessConfig.NetType == "mainnet" {
 		log.Infof("nettype: mainnet")

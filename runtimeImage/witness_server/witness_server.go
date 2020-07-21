@@ -343,7 +343,11 @@ func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 		return err
 	}
 
-	_, err = DefStore.Get(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH))
+	currentBlockHeight, err := DefStore.Get(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH))
+	if err == nil {
+		log.Infof("InitCompactMerkleTree: currentBlockHeight: %d", currentBlockHeight)
+	}
+
 	if err != nil {
 		// localHeight not init. first time init.
 		log.Info("server first run time. init.")
@@ -410,6 +414,16 @@ func InitCompactMerkleTree(updatecontract bool, forceHeight uint32) error {
 			copy(tmpContractAddr[:], addrByte)
 			if tmpContractAddr != contractAddress {
 				return fmt.Errorf("Init Error. Can not change contractAddress %s to %s after restart.", tmpContractAddr.ToHexString(), contractAddress.ToHexString())
+			}
+		}
+
+		sinkh := common.NewZeroCopySink(nil)
+		if forceHeight != 0 {
+			log.Infof("InitCompactMerkleTree: force sync block height to %d", forceHeight)
+			sinkh.WriteUint32(forceHeight)
+			err = DefStore.Put(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH), sinkh.Bytes())
+			if err != nil {
+				return err
 			}
 		}
 	}
@@ -628,6 +642,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 		}
 
 		if localHeight > blockHeight {
+			log.Infof("RoutineOfAddToLocalStorage bigger. Local Height: %d, CurrentBlockHeight: %d.", localHeight, blockHeight)
 			time.Sleep(time.Second * time.Duration(DefConfig.TryChainInterval))
 			continue
 		}
@@ -635,10 +650,41 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 		log.Debugf("Local Height: %d, CurrentBlockHeight: %d", localHeight, blockHeight)
 		blockevents, err := DefSdk.GetSmartContractEventByBlock(localHeight)
 		//log.Debugf("RoutineOfAddToLocalStorage blockevents : %v, err: %s", blockevents, err)
-		if err != nil {
+		if err != nil || blockevents == nil {
 			// may packet drop.
-			time.Sleep(time.Second * time.Duration(DefConfig.TryChainInterval))
-			continue
+			log.Warnf("RoutineOfAddToLocalStorage GetSmartContractEventByBlock Local Height: %d, CurrentBlockHeight: %d. %s", localHeight, blockHeight, err)
+			if blockevents == nil {
+				log.Warnf("RoutineOfAddToLocalStorage  blockevents nil")
+			}
+
+			if err != nil {
+				time.Sleep(time.Second * time.Duration(DefConfig.TryChainInterval))
+				continue
+			} else {
+				blockTxHashes, err := DefSdk.GetBlockTxHashesByHeight(localHeight)
+				if err != nil || blockTxHashes == nil {
+					log.Warnf("RoutineOfAddToLocalStorage GetBlockTxHashesByHeight err. localHeight: %d. CurrentBlockHeight: %d", localHeight, blockHeight)
+					time.Sleep(time.Second * time.Duration(DefConfig.TryChainInterval))
+					continue
+				}
+
+				// indicates have transactions in block. so blockevents nil must be net unstable issue. not due to  empty block.
+				if len(blockTxHashes.Transactions) != 0 {
+					log.Warnf("RoutineOfAddToLocalStorage net unstable to get nil blockevents. localHeight: %d. CurrentBlockHeight: %d", localHeight, blockHeight)
+					time.Sleep(time.Second * time.Duration(DefConfig.TryChainInterval))
+					continue
+				} else {
+					// if blockevents nil due to empty block
+					log.Warnf("RoutineOfAddToLocalStorage  empty block. localHeight: %d. CurrentBlockHeight: %d", localHeight, blockHeight)
+					sinkh := common.NewZeroCopySink(nil)
+					sinkh.WriteUint32(localHeight + 1)
+					err := store.Put(GetKeyByHash(PREFIX_CURRENT_BLOCKHEIGHT, merkle.EMPTY_HASH), sinkh.Bytes())
+					if err != nil {
+						log.Errorf("RoutineOfAddToLocalStorage: update height err %s", err)
+					}
+					continue
+				}
+			}
 		}
 
 		// note all block should ledger to vocal or not. can not partly. if error happend all tx in oneblock to local ledger will drop.
@@ -704,6 +750,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 				}
 
 				if txExecFailed {
+					log.Warnf("RoutineOfAddToLocalStorage: failed tx: %s", txh)
 					newtx, err := constructTransation(DefSdk, leafv)
 					if err != nil {
 						log.Errorf("RoutineOfAddToLocalStorage: constructTransation failed. %s", err)
@@ -720,6 +767,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 
 					// delete old tx. delete from txstore map ok. if failed will Unmarshal from leveldbstore.
 					delTransaction(&store, tx.Hash())
+					log.Warnf("RoutineOfAddToLocalStorage: new tx: %s", newtx.Hash())
 					addHashes = append(addHashes, newtx.Hash())
 					// continue to handle next tx. or blocks
 					continue
@@ -753,7 +801,10 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 				}
 
 				newroot, newtreeSize, txExecFailed, err := GetChainRootTreeSize(event)
-				log.Debugf("RoutineOfAddToLocalStorage: check tx not in pool. %s", err)
+				if err == nil {
+					log.Warnf("RoutineOfAddToLocalStorage: txHash: %s. newroot: %x. newtreeSize: %d.", event.TxHash, newroot, newtreeSize)
+				}
+
 				if err == nil && !txExecFailed {
 					// must tx from server contract address if enter in here. but need exclude all any other notify. be sure is batchadd. not other like get_root.
 					count := uint32(0)
@@ -762,7 +813,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 					// loop to get transaction.
 					for {
 						txchain, err = DefSdk.GetTransaction(event.TxHash)
-						if err != nil {
+						if err != nil || txchain == nil {
 							if count > 100 {
 								log.Fatalf("RoutineOfAddToLocalStorage: found transaction not in pool. some one may operate the chain contract. or just get_root need check: %s. chain offline. just restart to try.", err)
 								SystemOutOfService = true
@@ -816,6 +867,8 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 				// here indicate tx not influence contract. check next event.
 			}
 		}
+
+		log.Infof("RoutineOfAddToLocalStorage reord. Local Height: %d, CurrentBlockHeight: %d.", localHeight, blockHeight)
 
 		if !handledMerkleTx {
 			sinkh := common.NewZeroCopySink(nil)
