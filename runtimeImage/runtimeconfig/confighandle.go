@@ -76,10 +76,11 @@ type ServerConfig struct {
 }
 
 type WitnessConfig struct {
-	AuthPubKey []string `json:"authpubkey"`
-	TenantId   string   `json:"tenant_id"`
-	WalletName string   `json:"wallet_name"`
-	NetType    string   `json:"nettype"`
+	AuthPubKey      []string `json:"authpubkey"`
+	TenantId        string   `json:"tenant_id"`
+	WalletName      string   `json:"wallet_name"`
+	NetType         string   `json:"nettype"`
+	ContractAddress string   `json:"contractAddress"`
 }
 
 type ConfigServer struct {
@@ -108,7 +109,8 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	data, err := configServer.DB.Get(GetOtherKeyByHash(KEY_SERVER_STATE))
 	if err != nil {
-		configServer.State = SERVER_STATE_INIT
+		// must already deployed
+		configServer.State = SERVER_STATE_DEPLOY_SUCCESS
 	} else {
 		configServer.State, hexAddress, err = GetStateFromBytes(data)
 	}
@@ -172,7 +174,14 @@ func NewConfigServer(levelDBName string, fixedConfigPath string, witnessConfigPa
 
 	configServer.OntSdk = ontSdk
 	configServer.ServerConfig = &fixedConfig
-	configServer.ServerConfig.ContracthexAddr = hexAddress
+	configServer.ServerConfig.ContracthexAddr = witnessConfig.ContractAddress
+	if hexAddress != "" && witnessConfig.ContractAddress != hexAddress {
+		return nil, fmt.Errorf("contract address already init to %s. not %s", hexAddress, witnessConfig.ContractAddress)
+	}
+
+	if configServer.ServerConfig.ContracthexAddr == "" {
+		return nil, fmt.Errorf("contract address can not init to empty.")
+	}
 
 	wallresp, err := RequestForWallet(ismainnet, witnessConfig.WalletName)
 	if err != nil {
@@ -391,6 +400,7 @@ func main() {
 	switch server.State {
 	case SERVER_STATE_INIT:
 		// deploy contract.
+		log.Errorf("impossible get here. due to already deployed")
 		contracthexAddr, err := server.DeployNewContract(contractname)
 		if err != nil {
 			log.Errorf("deploy contract %s failed: %s", contracthexAddr, err)
@@ -429,6 +439,7 @@ func main() {
 			os.Exit(1)
 		}
 	case SERVER_STATE_DEPLOY_SUCCESS:
+		log.Infof("case SERVER_STATE_DEPLOY_SUCCESS")
 		if !checkContractExist(server.OntSdk, server.ServerConfig.ContracthexAddr, 3) {
 			log.Errorf("SERVER_STATE_DEPLOY_SUCCESS restart contracthexAddr %s not exist", server.ServerConfig.ContracthexAddr)
 			os.Exit(1)

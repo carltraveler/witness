@@ -20,11 +20,6 @@ rm -f $prefixworkdir/server_exit
 	exit 1 
 }
 
-[[ -f $contractdir/contract.wasm ]] || { 
-	echo "wasm file not found" | tee $prefixworkdir/server_exit
-	exit 1 
-}
-
 [[ -f config.fixed.json ]] || { 
 	echo "config.fixed.json should be set by."  | tee $prefixworkdir/server_exit
 	exit 1 
