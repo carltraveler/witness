@@ -25,6 +25,12 @@ rm -f $prefixworkdir/server_exit
 	exit 1 
 }
 
+[[ ! -d "fonts/" ]] && echo "Directory fonts/ DOES NOT exists." && exit 1
+[[ ! -d "img/" ]] && echo "Directory img/ DOES NOT exists." && exit 1
+[[ ! -d "js/" ]] && echo "Directory js/ DOES NOT exists." && exit 1
+[[ ! -d "css/" ]] && echo "Directory css/ DOES NOT exists." && exit 1
+[[ ! -f "index.html" ]] && echo "file index.html DOES NOT exists." && exit 1
+
 echo "depoy. init. and generate config.run.json."
 ./confighandle -runPath $prefixworkdir -configPath $appconfigdir -contractPath $contractdir
 
