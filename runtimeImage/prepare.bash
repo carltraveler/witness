@@ -21,3 +21,9 @@ cp runtimeconfig/config.json $preparedir/
 #cp ../contract.wasm wasm/
 #cp ../config.json appconfig/
 
+# copy web file
+cp -r witness_server/css/ $preparedir
+cp -r witness_server/fonts/ $preparedir
+cp -r witness_server/img/ $preparedir
+cp -r witness_server/index.html $preparedir
+cp -r witness_server/js/ $preparedir

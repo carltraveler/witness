@@ -34,6 +34,12 @@ echo "depoy. init. and generate config.run.json."
 	# wallet from server now.
 	#cp ./wallet.dat $prefixworkdir/
 	cp ./witness_server_daemon $prefixworkdir
+  cp -r ./css $prefixworkdir
+  cp -r ./fonts $prefixworkdir
+  cp -r ./img $prefixworkdir
+  cp -r ./index.html $prefixworkdir
+  cp -r ./js $prefixworkdir
+  
 	cd $prefixworkdir
 	txt=$(cat txtpswd.txt)
 	rm -f txtpswd.txt
