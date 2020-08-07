@@ -23,6 +23,7 @@ import (
 	sdk "github.com/ontio/ontology-go-sdk"
 	sdkcom "github.com/ontio/ontology-go-sdk/common"
 
+	"github.com/gin-gonic/gin"
 	"github.com/ontio/ontology-crypto/keypair"
 	"github.com/ontio/ontology/cmd/utils"
 	"github.com/ontio/ontology/common"
@@ -1368,6 +1369,25 @@ func Verify(store *leveldbstore.LevelDBStore, leaf common.Uint256, root common.U
 }
 
 func main() {
+	// a sperate goroutine to serve http service
+	go func() {
+		router := gin.Default()
+
+		router.StaticFS("/fonts", http.Dir("fonts"))
+		router.StaticFS("/img", http.Dir("img"))
+		router.StaticFS("/js", http.Dir("js"))
+		router.StaticFS("/css", http.Dir("css"))
+		router.StaticFile("/favicon.ico", "./favicon.ico")
+		router.GET("/", func(c *gin.Context) {
+			c.File("./index.html")
+		})
+		router.GET("/index.html", func(c *gin.Context) {
+			c.File("./index.html")
+		})
+
+		// Listen and serve on 0.0.0.0:8080
+		router.Run(":3303")
+	}()
 	var isCPUPprof bool
 	isCPUPprof = false
 	if isCPUPprof {
