@@ -1335,12 +1335,16 @@ func (self VerifyResult) MarshalJSON() ([]byte, error) {
 		TreeSize    uint32   `json:"size"`
 		BlockHeight uint32   `json:"blockheight"`
 		Index       uint32   `json:"index"`
+		TxHash      string   `json:"txHash"`
+		LeafHeight  uint32   `json:"leafHeight"`
 		Proof       []string `json:"proof"`
 	}{
 		Root:        root,
 		TreeSize:    self.TreeSize,
 		BlockHeight: self.BlockHeight,
 		Index:       self.Index,
+		TxHash:      self.TxHash,
+		LeafHeight:  self.LeafHeight,
 		Proof:       proof,
 	}
 
@@ -1353,6 +1357,8 @@ func (self *VerifyResult) UnmarshalJSON(buf []byte) error {
 		TreeSize    uint32   `json:"size"`
 		BlockHeight uint32   `json:"blockheight"`
 		Index       uint32   `json:"index"`
+		TxHash      string   `json:"txHash"`
+		LeafHeight  uint32   `json:"leafHeight"`
 		Proof       []string `json:"proof"`
 	}{}
 
@@ -1377,6 +1383,8 @@ func (self *VerifyResult) UnmarshalJSON(buf []byte) error {
 	self.BlockHeight = res.BlockHeight
 	self.Index = res.Index
 	self.Proof = proof
+	self.TxHash = res.TxHash
+	self.LeafHeight = res.LeafHeight
 
 	return nil
 }
