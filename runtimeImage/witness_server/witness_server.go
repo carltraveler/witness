@@ -53,6 +53,10 @@ const (
 	PREFIX_CONTRACT_ADDRESS       DataPrefix = 0x9
 )
 
+var (
+	LEAF_HEIGHT_EMPTY_ERR = errors.New("LEAF_HEIGHT_EMPTY")
+)
+
 const (
 	levelDBName          string = "leveldb"
 	sigDBName            string = "sigDB"
@@ -550,9 +554,11 @@ func getRootBlockHeight(store *leveldbstore.LevelDBStore, root common.Uint256) (
 	return res, nil
 }
 
-func putLeafIndex(store *leveldbstore.LevelDBStore, leaf common.Uint256, index uint32) {
+func putLeafIndex(store *leveldbstore.LevelDBStore, leaf common.Uint256, index uint32, block_height uint32, tx_hash string) {
 	sink := common.NewZeroCopySink(nil)
 	sink.WriteUint32(index)
+	sink.WriteUint32(block_height)
+	sink.WriteString(tx_hash)
 	store.BatchPut(GetKeyByHash(PREFIX_INDEX, leaf), sink.Bytes())
 }
 
@@ -575,6 +581,31 @@ func getLeafIndex(store *leveldbstore.LevelDBStore, leaf common.Uint256) (uint32
 	}
 
 	return res, nil
+}
+
+func getLeafInfo(store *leveldbstore.LevelDBStore, leaf common.Uint256) (uint32, uint32, string, error) {
+	val, err := store.Get(GetKeyByHash(PREFIX_INDEX, leaf))
+	if err != nil {
+		return 0, 0, "", err
+	}
+
+	source := common.NewZeroCopySource(val)
+	index, eof := source.NextUint32()
+	if eof {
+		return 0, 0, "", io.ErrUnexpectedEOF
+	}
+
+	localHeight, eof := source.NextUint32()
+	if eof {
+		return index, 0, "", LEAF_HEIGHT_EMPTY_ERR
+	}
+
+	tx_hash, _, _, eof := source.NextString()
+	if eof {
+		return index, 0, "", io.ErrUnexpectedEOF
+	}
+
+	return index, localHeight, tx_hash, nil
 }
 
 func hashLeaf(data []byte) common.Uint256 {
@@ -781,7 +812,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 						return
 					}
 					tmpTree.AppendHash(leafv[i])
-					putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1)
+					putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1, localHeight, event.TxHash)
 				}
 
 				log.Infof("tx hash, %s, Local Height: %d, CurrentBlockHeight: %d", event.TxHash, localHeight, blockHeight)
@@ -852,7 +883,7 @@ func RoutineOfAddToLocalStorage(correctDatabase uint32) {
 							return
 						}
 						tmpTree.AppendHash(leafv[i])
-						putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1)
+						putLeafIndex(&store, leafv[i], tmpTree.TreeSize()-1, localHeight, event.TxHash)
 					}
 
 					log.Infof("tx hash, %s, Local Height: %d, CurrentBlockHeight: %d", event.TxHash, localHeight, blockHeight)
@@ -1129,7 +1160,7 @@ func RoutineOfBatchAdd(leafv []common.Uint256) ([]string, error) {
 		if err == nil {
 			duplicateLeafs = append(duplicateLeafs, common.ToHexString(leafv[i][:]))
 		}
-		putLeafIndex(&store, leafv[i], math.MaxUint32)
+		putLeafIndex(&store, leafv[i], math.MaxUint32, 0, common.UINT256_EMPTY.ToHexString())
 	}
 
 	if len(duplicateLeafs) != 0 {
@@ -1287,6 +1318,8 @@ type VerifyResult struct {
 	TreeSize    uint32           `json:"size"`
 	BlockHeight uint32           `json:"blockheight"`
 	Index       uint32           `json:"index"`
+	TxHash      string           `json:"txHash"`
+	LeafHeight  uint32           `json:"leafHeight"`
 	Proof       []common.Uint256 `json:"proof"`
 }
 
@@ -1630,6 +1663,10 @@ func rpcVerify(vargs *RpcParam) map[string]interface{} {
 	treeSize = DefMerkleTree.TreeSize()
 	blockheight, err = getRootBlockHeight(DefStore, root)
 	MTlock.RUnlock()
+	if err != nil {
+		log.Debugf("get blockheight failed, %s", err)
+		return responsePack(VERIFY_FAILED, nil)
+	}
 
 	proof, index, err := Verify(DefStore, leaf, root, treeSize)
 	if err != nil {
@@ -1637,15 +1674,20 @@ func rpcVerify(vargs *RpcParam) map[string]interface{} {
 		return responsePack(VERIFY_FAILED, nil)
 	}
 
-	if err != nil {
-		log.Debugf("get blockheight failed, %s", err)
-		return responsePack(VERIFY_FAILED, nil)
+	_, leafBlockHeight, leafTxHash, err := getLeafInfo(DefStore, leaf)
+	if err == LEAF_HEIGHT_EMPTY_ERR {
+		log.Debugf("getLeafInfo leaf_block_height tx_hash %s", err)
+	} else if err != nil {
+		log.Debugf("getLeafInfo leaf_block_height  err %s", err)
 	}
+
 	res := VerifyResult{
 		Root:        root,
 		TreeSize:    treeSize,
 		BlockHeight: blockheight,
 		Index:       index,
+		TxHash:      leafTxHash,
+		LeafHeight:  leafBlockHeight,
 		Proof:       proof,
 	}
 
